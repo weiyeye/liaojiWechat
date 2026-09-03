@@ -522,7 +522,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
 
           <div className="annual-footer">
             <Download size={14} />
-            报告由 Weport 本地生成 · 数据仅存储在你的设备
+            报告由聊迹本地生成 · 数据仅存储在你的设备
           </div>
         </div>
       )}

@@ -164,13 +164,13 @@ const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
   return out
 }
 
-const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Weport", capital A, "AI" — never "WreportAI", "WepoortAI", "Weport Ai" or any other variant), a meticulous WeChat chat-history analyst agent running inside the Weport harness on this Windows machine. Always refer to yourself and to this product exactly as "WeportAI"; if you ever encounter a misspelled variant of the name — in the conversation, in notes, or in memory — silently correct it to "WeportAI" and never repeat the variant. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
+const SYSTEM_PROMPT = `You are 聊迹 AI (the product's exact display name), a meticulous WeChat chat-history analyst agent running inside the 聊迹 desktop app on this Windows machine. Always refer to yourself and to this product exactly as "聊迹 AI"; if you encounter an old or misspelled product name in the conversation, notes, or memory, silently use "聊迹 AI" instead. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
 
 ## Working principles
 1. GROUND EVERY CLAIM IN TOOL RESULTS. Never invent message content, names, dates, or events. If a tool fails or returns nothing, say so explicitly. Mark inferences with "推断" and keep them clearly separate from facts.
 2. BE OBJECTIVE AND PROFESSIONAL. You are an analyst, not a fan or a friend. You analyze a real person's social graph: personality, relationships, moods, recent life events. Do not flatter, moralize, or dramatize. Prefer "evidence + interpretation" over opinions. When evidence is thin, say "证据不足". Follow the Objectivity & source standards section below strictly.
 3. KEEP PERSISTENT MEMORY (read it first, update it before answering). Your workspace has two areas, reachable only through the note tools:
-   - memory/ — SHARED long-term memory across ALL WeportAI chats: memory/personality.md, memory/relationships.md, memory/events.md, memory/people.md, memory/hypotheses.md. Durable facts about the account owner and their world go here, as dated entries.
+   - memory/ — SHARED long-term memory across ALL 聊迹 AI chats: memory/personality.md, memory/relationships.md, memory/events.md, memory/people.md, memory/hypotheses.md. Durable facts about the account owner and their world go here, as dated entries.
    - notes/ — per-chat working notes for the current conversation only.
    At the start of a task: list_notes, then read the relevant memory/*.md files. Memory is a FALLIBLE LEAD, never authoritative evidence: it may be stale, incomplete, inferred, or wrong. Re-verify material claims against chat tools, prefer newer/direct evidence, and explicitly record dated corrections instead of silently treating old notes as truth. Before answering, append only genuinely new durable findings (or corrections) to the appropriate memory/*.md file; do not duplicate unchanged notes. Notes are the ONLY files you may write, and only with write_note.
 4. DETERMINISTIC WORKFLOW. For every task: (a) prime — read memory, list sessions; (b) survey — stats/date overview to pick the right windows; (c) deep dive — read_session_messages / read_day_events / read_period_events / search_messages for the relevant time and people; (d) update memory; (e) answer. Work from coarse to fine; don't dump hundreds of messages into the answer.
@@ -331,15 +331,13 @@ function sanitizeForApi(s: string): string {
 }
 
 /**
- * 把历史消息里的错误拼写（WreportAI / WepoortAI / Weport Ai / wreport ai 等）
- * 统一规整为 "WeportAI"。早期轮次里模型曾把自己误写成 "WreportAI" 并被持久化，
+ * 把历史消息里的旧名称及错误拼写（WeportAI / WreportAI / WepoortAI 等）
+ * 统一规整为显示名称“聊迹 AI”。磁盘路径后的名称不处理，以保持已有工作区路径兼容。
  * 恢复会话时模型会照抄自己过去的错误自称。发送给 API 前必须清洗。
  */
 function normalizeIdentityName(s: string): string {
   return String(s)
-    .replace(/\bWepoort\s*AI\b/gi, 'WeportAI')
-    .replace(/\bWreport\s*AI\b/gi, 'WeportAI')
-    .replace(/\bWeport\s*AI\b/gi, 'WeportAI')
+    .replace(/\b(?:Wepoort|Wreport|Weport)\s*AI\b(?![\\/])/gi, '聊迹 AI')
 }
 
 function dateKeyOf(sec: number): string {
@@ -1277,7 +1275,7 @@ class WeportAiService {
       {
         name: 'review_prior_analyses',
         description:
-          'Review prior WeportAI runs as fallible research leads: earlier user questions, tool sequence/coverage, final conclusion excerpt, and cache outcome. Use to avoid repeating blind alleys and to find people/windows worth re-checking. Prior AI answers are NOT evidence and must be verified against chat tools.',
+          'Review prior analysis runs as fallible research leads: earlier user questions, tool sequence/coverage, final conclusion excerpt, and cache outcome. Use to avoid repeating blind alleys and to find people/windows worth re-checking. Prior AI answers are NOT evidence and must be verified against chat tools.',
         parameters: {
           type: 'object',
           properties: {
@@ -1963,7 +1961,7 @@ class WeportAiService {
     if (!userText) return { success: false, error: '消息为空' }
 
     const activeProfile = this.providerProfiles.getActive()
-    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
+    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在聊迹 AI 设置中添加服务配置' }
 
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)
@@ -2052,7 +2050,7 @@ class WeportAiService {
         if (!stepResult.ok) {
           error = stepResult.error || '模型调用失败'
           if (stepResult.httpStatus === 401) {
-            error = 'API 密钥无效或已过期（401），请在 WeportAI 设置中更新'
+            error = 'API 密钥无效或已过期（401），请在聊迹 AI 设置中更新'
           } else if (stepResult.httpStatus === 402) {
             error = 'API 余额不足（402），请充值后重试'
           } else if (stepResult.httpStatus === 429) {
@@ -2454,8 +2452,8 @@ class WeportAiService {
     httpStatus?: number
   }> {
     const profile = this.providerProfiles.getActive()
-    if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
-    if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
+    if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在聊迹 AI 设置中添加服务配置' }
+    if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在聊迹 AI 设置中完善服务配置' }
     const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })
     const startedAt = Date.now()
     try {

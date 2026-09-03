@@ -116,7 +116,30 @@ export class DbPathService {
         // 部分发行版/手动安装会放在文档目录下
         possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
       } else {
-        // Windows 微信4.x 数据目录
+        // Windows: 优先读取微信「设置-存储位置」配置。
+        // ini 中通常保存的是存储父目录，真实数据库位于其下的 xwechat_files；
+        // 同时保留原始路径，兼容 ini 直接指向 xwechat_files 的情况。
+        try {
+          const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming')
+          const configDir = join(appData, 'Tencent', 'xwechat', 'config')
+          if (existsSync(configDir)) {
+            const iniFiles = readdirSync(configDir).filter((file) => file.toLowerCase().endsWith('.ini'))
+            for (const iniFile of iniFiles) {
+              try {
+                const configuredPath = readFileSync(join(configDir, iniFile), 'utf8').trim()
+                if (!configuredPath) continue
+                possiblePaths.push(join(configuredPath, 'xwechat_files'))
+                possiblePaths.push(configuredPath)
+              } catch {
+                // 单个配置文件损坏时继续尝试其它候选路径。
+              }
+            }
+          }
+        } catch {
+          // 读取微信配置失败时继续使用默认路径。
+        }
+
+        // Windows 微信 4.x 默认数据目录
         possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
       }
 

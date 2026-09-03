@@ -117,7 +117,7 @@ export class ProviderProfileService {
     const providerId = /deepseek/i.test(baseUrl) || /^deepseek/i.test(model) ? 'deepseek' : 'custom'
     const profile = makeDefaultProfile({
       providerId,
-      name: providerId === 'deepseek' ? 'DeepSeek（已迁移）' : '旧版 WeportAI 配置',
+      name: providerId === 'deepseek' ? 'DeepSeek（已迁移）' : '旧版聊迹 AI 配置',
       baseUrl,
       model,
       apiKey,

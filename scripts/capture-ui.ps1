@@ -98,10 +98,13 @@ Remove-Item Env:WEPORT_SCREENSHOT_OUT -ErrorAction SilentlyContinue
 
 $mainPng = Join-Path $OutputDir 'main.png'
 $popupPng = Join-Path $OutputDir 'popup.png'
+$chatPng = Join-Path $OutputDir 'chat.png'
 $exportPng = Join-Path $OutputDir 'export.png'
-$antirecallPng = Join-Path $OutputDir 'antirecall.png'
+$exportDateRangePng = Join-Path $OutputDir 'export-date-range.png'
+$exportScopePng = Join-Path $OutputDir 'export-scope.png'
+$exportNarrowPng = Join-Path $OutputDir 'export-narrow.png'
 $notificationsPng = Join-Path $OutputDir 'notifications.png'
-$aiPng = Join-Path $OutputDir 'ai.png'
+$notificationsFilterPng = Join-Path $OutputDir 'notifications-filter.png'
 $snsPng = Join-Path $OutputDir 'sns.png'
 $hubPng = Join-Path $OutputDir 'analytics-hub.png'
 $globalPng = Join-Path $OutputDir 'analytics-global.png'
@@ -125,15 +128,15 @@ function Assert-Captured([string]$Path, [string]$Label) {
 }
 Assert-Captured $mainPng 'main.png'
 Assert-Captured $popupPng 'popup.png'
+Assert-Captured $chatPng 'chat.png'
 Assert-Captured $exportPng 'export.png'
+Assert-Captured $exportDateRangePng 'export-date-range.png'
+Assert-Captured $exportScopePng 'export-scope.png'
 Assert-Captured (Join-Path $OutputDir 'export-scope-rects.json') 'export-scope-rects.json'
-Assert-Captured $antirecallPng 'antirecall.png'
+Assert-Captured $exportNarrowPng 'export-narrow.png'
+Assert-Captured (Join-Path $OutputDir 'export-narrow-rects.json') 'export-narrow-rects.json'
 Assert-Captured $notificationsPng 'notifications.png'
-# AI 页截图在 CI 软渲染下偶发挂载超时（渲染进程忙），作为软性检查：
-# 失败仅警告，不阻断（README 该图由本地 -PublishToDocs 重新生成）
-if (-not (Test-Path $aiPng)) {
-  Write-Output "WARN ai.png missing - WeportAI tab capture failed (non-fatal; see screenshot.log)"
-}
+Assert-Captured $notificationsFilterPng 'notifications-filter.png'
 Assert-Captured $snsPng 'sns.png'
 Assert-Captured $hubPng 'analytics-hub.png'
 Assert-Captured $globalPng 'analytics-global.png'
@@ -143,10 +146,13 @@ Assert-Captured $settingsPng 'settings.png'
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
+Assert-ImageHasContent $chatPng 'chat tab'
 Assert-ImageHasContent $exportPng 'export tab'
-Assert-ImageHasContent $antirecallPng 'antirecall tab'
+Assert-ImageHasContent $exportDateRangePng 'export custom date range'
+Assert-ImageHasContent $exportScopePng 'export session sidebar'
+Assert-ImageHasContent $exportNarrowPng 'export session sidebar at minimum width'
 Assert-ImageHasContent $notificationsPng 'notifications tab'
-if (Test-Path $aiPng) { Assert-ImageHasContent $aiPng 'WeportAI tab' }
+Assert-ImageHasContent $notificationsFilterPng 'notification session filter'
 Assert-ImageHasContent $snsPng 'moments'
 Assert-ImageHasContent $hubPng 'analytics hub'
 Assert-ImageHasContent $globalPng 'global analytics'
@@ -159,10 +165,9 @@ if ($PublishToDocs) {
   $docsDir = Join-Path $ProjectRoot "docs\screenshots"
   New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
   Copy-Item $mainPng (Join-Path $docsDir "connect.png") -Force
+  Copy-Item $chatPng (Join-Path $docsDir "chat.png") -Force
   Copy-Item $exportPng (Join-Path $docsDir "export.png") -Force
-  Copy-Item $antirecallPng (Join-Path $docsDir "antirecall.png") -Force
   Copy-Item $notificationsPng (Join-Path $docsDir "notifications.png") -Force
-  Copy-Item $aiPng (Join-Path $docsDir "ai.png") -Force
   Copy-Item $popupPng (Join-Path $docsDir "popup.png") -Force
   Copy-Item $snsPng (Join-Path $docsDir "sns.png") -Force
   Copy-Item $hubPng (Join-Path $docsDir "analytics-hub.png") -Force

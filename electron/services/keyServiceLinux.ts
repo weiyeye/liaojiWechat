@@ -194,7 +194,7 @@ export class KeyServiceLinux {
       onStatus?.('基址扫描成功，正在请求管理员权限进行内存 Hook...', 0)
 
       if (!this.sudo || typeof this.sudo.exec !== 'function') {
-        const err = 'Linux 授权组件 @vscode/sudo-prompt 未加载，请确认依赖已安装并重新启动 Weport'
+        const err = 'Linux 授权组件 @vscode/sudo-prompt 未加载，请确认依赖已安装并重新启动聊迹'
         onStatus?.(err, 2)
         return { success: false, error: err }
       }

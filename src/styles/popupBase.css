@@ -12,8 +12,8 @@
 }
 
 body {
-  font-family: "Weport", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
+  font-family: "Segoe UI Variable Text", "SF Pro Text", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }

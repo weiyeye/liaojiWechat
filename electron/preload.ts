@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ExportRequest } from './services/export/types'
+import type { ContactExportOptions } from './services/contactExportService'
 
 // 事件订阅统一模式：返回"只移除本回调"的退订函数。
 // 用 removeAllListeners 会把同频道的其他订阅者（多组件）一并清掉。
@@ -113,24 +114,72 @@ contextBridge.exposeInMainWorld('electronAPI', {
     connect: () => ipcRenderer.invoke('chat:connect'),
     close: () => ipcRenderer.invoke('chat:close'),
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
+    getContacts: (options?: { lite?: boolean }) => ipcRenderer.invoke('chat:getContacts', options),
     markAllSessionsRead: () => ipcRenderer.invoke('chat:markAllSessionsRead'),
     getContactAvatar: (username: string, chatroomId?: string) =>
       ipcRenderer.invoke('chat:getContactAvatar', username, chatroomId),
     enrichSessionsContactInfo: (usernames: string[], options?: any) =>
       ipcRenderer.invoke('chat:enrichSessionsContactInfo', usernames, options),
     getSessionStatuses: (usernames: string[]) => ipcRenderer.invoke('chat:getSessionStatuses', usernames),
-    getNewMessages: (sessionId: string, minTime: number, limit?: number) =>
-      ipcRenderer.invoke('chat:getNewMessages', sessionId, minTime, limit),
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit, startTime, endTime, ascending),
+    getLatestMessages: (sessionId: string, limit?: number) =>
+      ipcRenderer.invoke('chat:getLatestMessages', sessionId, limit),
+    getMessagesAround: (sessionId: string, target: { localId?: number; createTime: number; messageKey?: string }, totalContextCount?: number) =>
+      ipcRenderer.invoke('chat:getMessagesAround', sessionId, target, totalContextCount),
+    getNewMessages: (sessionId: string, minTime: number, limit?: number, cursor?: { createTime?: number; sortSeq?: number; localId?: number; serverId?: number | string; serverIdRaw?: string }) =>
+      ipcRenderer.invoke('chat:getNewMessages', sessionId, minTime, limit, cursor),
+    getMessageDates: (sessionId: string) => ipcRenderer.invoke('chat:getMessageDates', sessionId),
+    getMessageDateCounts: (sessionId: string) => ipcRenderer.invoke('chat:getMessageDateCounts', sessionId),
+    searchMessages: (keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) =>
+      ipcRenderer.invoke('chat:searchMessages', keyword, sessionId, limit, offset, beginTimestamp, endTimestamp),
+    getSessionDetailFast: (sessionId: string) => ipcRenderer.invoke('chat:getSessionDetailFast', sessionId),
+    getSessionDetailExtra: (sessionId: string) => ipcRenderer.invoke('chat:getSessionDetailExtra', sessionId),
+    getMyAvatarUrl: () => ipcRenderer.invoke('chat:getMyAvatarUrl'),
+    getImageData: (sessionId: string, msgId: string, hint?: { imageMd5?: string; imageDatName?: string; createTime?: number; rawContent?: string }) =>
+      ipcRenderer.invoke('chat:getImageData', sessionId, msgId, hint),
+    getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+      ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId, createTime, serverId, senderWxid),
+    resolveVoiceCache: (sessionId: string, msgId: string) =>
+      ipcRenderer.invoke('chat:resolveVoiceCache', sessionId, msgId),
+    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+      ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId, createTime, serverId, senderWxid),
+    onVoiceTranscriptPartial: (callback: (payload: { sessionId: string; msgId: string; createTime?: number; text: string }) => void) =>
+      subscribe('chat:voiceTranscriptPartial', callback),
+    preloadSessionVoices: (sessionId: string) => ipcRenderer.invoke('chat:preloadSessionVoices', sessionId),
+    preloadSessionImages: (sessionId: string) => ipcRenderer.invoke('chat:preloadSessionImages', sessionId),
     getAntiRevokeSessions: () => ipcRenderer.invoke('chat:getAntiRevokeSessions'),
     checkAntiRevokeTriggers: (sessionIds: string[]) => ipcRenderer.invoke('chat:checkAntiRevokeTriggers', sessionIds),
     installAntiRevokeTriggers: (sessionIds: string[]) => ipcRenderer.invoke('chat:installAntiRevokeTriggers', sessionIds),
     uninstallAntiRevokeTriggers: (sessionIds: string[]) => ipcRenderer.invoke('chat:uninstallAntiRevokeTriggers', sessionIds)
   },
 
+  // 视频
+  video: {
+    getVideoInfo: (videoMd5: string, options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) =>
+      ipcRenderer.invoke('video:getVideoInfo', videoMd5, options),
+    parseVideoMd5: (content: string) => ipcRenderer.invoke('video:parseVideoMd5', content)
+  },
+
+  // 本地 SenseVoice 模型
+  whisper: {
+    downloadModel: () => ipcRenderer.invoke('whisper:downloadModel'),
+    cancelDownloadModel: () => ipcRenderer.invoke('whisper:cancelDownloadModel'),
+    getModelStatus: () => ipcRenderer.invoke('whisper:getModelStatus'),
+    onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number; speed?: number }) => void) =>
+      subscribe('whisper:downloadProgress', callback)
+  },
+
   // 导出
   export: {
+    getExportStats: (sessionIds: string[], options?: ExportRequest) =>
+      ipcRenderer.invoke('export:getExportStats', sessionIds, options),
+    prepareVoiceTranscripts: (sessionIds: string[], options?: ExportRequest) =>
+      ipcRenderer.invoke('export:prepareVoiceTranscripts', sessionIds, options),
     exportSessions: (outputRoot: string, options?: ExportRequest) =>
       ipcRenderer.invoke('export:exportSessions', outputRoot, options),
+    exportContacts: (outputDir: string, options: ContactExportOptions) =>
+      ipcRenderer.invoke('export:exportContacts', outputDir, options),
     cancelTask: (taskId: string) => ipcRenderer.invoke('export:cancelTask', taskId),
     getExportLog: (outputRoot: string) => ipcRenderer.invoke('export:getExportLog', outputRoot),
     clearLibrary: (outputRoot: string) => ipcRenderer.invoke('export:clearLibrary', outputRoot),

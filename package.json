@@ -39,15 +39,18 @@
     "koffi": "^3.1.0",
     "lucide-react": "^1.23.0",
     "marked": "^18.0.9",
+    "pdfkit": "^0.19.1",
     "react": "^19.2.3",
     "react-dom": "^19.2.7",
     "react-virtuoso": "^4.18.11",
+    "sherpa-onnx-node": "^1.13.7",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/pdfkit": "^0.17.6",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^6.0.3",
@@ -78,6 +81,7 @@
       "dist-electron/**/*",
       "assets/icons/**/*",
       "electron/assets/wasm/**/*",
+      "!node_modules/pdfkit/.yarn/**/*",
       "LICENSE",
       "NOTICE.md",
       "THIRD-PARTY-NOTICES.md",
@@ -120,6 +124,10 @@
         {
           "from": "electron/assets/wasm/",
           "to": "assets/wasm/"
+        },
+        {
+          "from": "src/assets/fonts/weport.ttf",
+          "to": "resources/fonts/weport.ttf"
         },
         {
           "from": "resources/host",
@@ -180,6 +188,10 @@
           "to": "assets/wasm/"
         },
         {
+          "from": "src/assets/fonts/weport.ttf",
+          "to": "resources/fonts/weport.ttf"
+        },
+        {
           "from": "resources/host",
           "to": "host"
         },
@@ -218,6 +230,10 @@
           "to": "assets/wasm/"
         },
         {
+          "from": "src/assets/fonts/weport.ttf",
+          "to": "resources/fonts/weport.ttf"
+        },
+        {
           "from": "resources/host",
           "to": "host"
         },
@@ -249,6 +265,9 @@
       "node_modules/koffi/**/*",
       "node_modules/@koromix/**/*",
       "node_modules/silk-wasm/**/*",
+      "node_modules/sherpa-onnx-node/**/*",
+      "node_modules/sherpa-onnx-*/*",
+      "node_modules/sherpa-onnx-*/**/*",
       "resources/wedecrypt/**/*.node"
     ],
     "electronLanguages": [

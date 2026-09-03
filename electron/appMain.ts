@@ -23,6 +23,8 @@ import {
 } from 'electron'
 import { pathToFileURL } from 'url'
 import { autoUpdater } from 'electron-updater'
+import { createDecipheriv } from 'crypto'
+import { spawnSync } from 'child_process'
 import { dirname, join } from 'path'
 import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
 import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as writeFileAsync } from 'fs/promises'
@@ -35,8 +37,11 @@ import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
 import { chatService } from './services/chatService'
+import { videoService } from './services/videoService'
+import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { wcdbService } from './services/wcdbService'
 import { exportService } from './services/export'
+import { contactExportService, type ContactExportOptions } from './services/contactExportService'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { backupService } from './services/backupService'
 import { httpService } from './services/httpService'
@@ -101,6 +106,27 @@ function resolveResourcesPath(): string {
     : join(app.getAppPath(), 'resources')
   const fallback = join(process.cwd(), 'resources')
   return existsSync(candidate) ? candidate : fallback
+}
+
+/**
+ * 返回导出根目录；首次使用时在桌面创建 Weport 专属默认文件夹并持久化。
+ * 已选择过自定义目录的用户保持原设置不变。
+ */
+function ensureConfiguredExportPath(): string {
+  const configured = String(configService?.get('exportPath') || '').trim()
+  if (configured) return configured
+  // QA/截图模式必须保持零持久化、零真实桌面副作用。
+  if (isAnyQaMode) return ''
+
+  const defaultPath = join(app.getPath('desktop'), 'exportWechatDir')
+  try {
+    mkdirSync(defaultPath, { recursive: true })
+    configService?.set('exportPath', defaultPath)
+    return defaultPath
+  } catch (error) {
+    console.error(`[Weport] 创建默认导出目录失败: ${defaultPath}`, error)
+    return ''
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +208,44 @@ function migrateLegacySettings() {
   if (store.get('windowCloseBehavior') === 'ask') store.set('windowCloseBehavior', 'tray')
   if (store.get('notificationEnabled') === undefined) store.set('notificationEnabled', false)
   if (store.get('messagePushEnabled') === undefined) store.set('messagePushEnabled', false)
+}
+
+/**
+ * PDF 成为默认格式后的单次迁移。
+ * 只替换旧版默认 TXT（以及已移除的 SQL）；迁移完成后尊重用户的任何选择。
+ */
+function migratePdfExportDefault() {
+  // QA/截图模式必须保持零真实配置写入；默认值本身已是 PDF。
+  if (isAnyQaMode) return
+  const store = configService
+  if (!store || store.get('exportDefaultFormatPdfMigrated') === true) return
+  const current = String(store.get('exportFormat') || '').trim()
+  if (!current || current === 'txt' || current === 'sql') {
+    store.set('exportFormat', 'pdf')
+  }
+  store.set('exportDefaultFormatPdfMigrated', true)
+}
+
+/**
+ * 新版导出内容默认组合的单次迁移。
+ * 保留图片、头像和体积限制，默认选择表情包并关闭其余可选内容。
+ */
+function migrateExportContentDefaultsV2() {
+  // QA/截图模式必须保持零真实配置写入；新安装的默认值本身已经正确。
+  if (isAnyQaMode) return
+  const store = configService
+  if (!store || store.get('exportContentDefaultsV2Migrated') === true) return
+
+  const currentMedia = store.get('exportMedia')
+  store.set('exportMedia', {
+    ...currentMedia,
+    videos: false,
+    voices: false,
+    emojis: true,
+    files: false,
+  })
+  store.set('exportVoiceAsText', false)
+  store.set('exportContentDefaultsV2Migrated', true)
 }
 
 // ---------------------------------------------------------------------------
@@ -558,13 +622,13 @@ const EXPORT_LOG_NAME = 'export_log.txt'
 
 /** 导出格式 → 输出根目录下的文件夹名 */
 const EXPORT_FORMAT_FOLDERS: Record<string, string> = {
+  pdf: 'PDF',
   txt: 'TXT',
   json: 'JSON',
   'arkme-json': 'ARKME-JSON',
   html: 'HTML',
   markdown: 'MARKDOWN',
   excel: 'XLSX',
-  sql: 'SQL',
   chatlab: 'CHATLAB',
   'chatlab-jsonl': 'CHATLAB-JSONL',
   weclone: 'WECLONE',
@@ -654,7 +718,7 @@ function clearExportLibrary(root: string): { success: boolean; removed: string[]
 // ---------------------------------------------------------------------------
 function buildPopupData(p: MessagePushPayload) {  const title = p.groupName && p.sourceName
     ? `${p.groupName} · ${p.sourceName}`
-    : (p.groupName || p.sourceName || p.sessionId || 'Weport')
+    : (p.groupName || p.sourceName || p.sessionId || '聊迹')
   return {
     sessionId: p.sessionId,
     channel: 'message',
@@ -819,8 +883,8 @@ function ensureWeChatRequestHeaderInterceptor() {
 }
 
 // ---------------------------------------------------------------------------
-// 应用图标（唯一来源：assets/branding/weport-icon.jpg → assets/icons/icon.png，
-// 打包时必须把 icon.png 放进 asar，否则窗口/托盘图标为空）
+// 应用图标（母版：assets/branding/weport-icon.png → assets/icons/icon.png；
+// 打包时必须把 icon.png 放进 asar，否则窗口/托盘图标为空）。
 // ---------------------------------------------------------------------------
 function resolveAppIconPath(): string {
   return join(app.getAppPath(), 'assets', 'icons', 'icon.png')
@@ -831,10 +895,11 @@ function resolveAppIconPath(): string {
 // ---------------------------------------------------------------------------
 function createWindow(autoShow: boolean): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1080,
-    height: 720,
+    width: 1280,
+    height: 860,
     minWidth: 920,
     minHeight: 600,
+    center: true,
     icon: nativeImage.createFromPath(resolveAppIconPath()),
     // 渲染层加载前窗口底色（否则首帧闪白）
     backgroundColor: '#000000',
@@ -853,10 +918,6 @@ function createWindow(autoShow: boolean): BrowserWindow {
     mainWindowReady = true
     if (autoShow) {
       win.show()
-      // 必须在 show 之后再 maximize，Windows 上 show 前的 maximize 会被忽略导致启动时不是全屏
-      if (!isAnyQaMode && !win.isMaximized()) {
-        try { win.maximize() } catch { /* noop */ }
-      }
     }
   })
 
@@ -917,10 +978,6 @@ function createWindow(autoShow: boolean): BrowserWindow {
   })
 
   loadMainWindowPage(win)
-  // 默认最大化启动（QA 模式保持固定窗口尺寸，保证截图/断言稳定）
-  if (!isAnyQaMode && autoShow) {
-    win.maximize()
-  }
   // 主窗口创建即注册微信 CDN 请求头拦截（幂等；首窗口/弹窗两条路径共用）。
   // 静默启动不建窗口时不注册，避免开机即初始化网络栈拉起网络服务子进程
   ensureWeChatRequestHeaderInterceptor()
@@ -1069,7 +1126,7 @@ function createTray() {
       .createFromPath(resolveAppIconPath())
       .resize({ width: 16, height: 16 })
     tray = new Tray(icon)
-    tray.setToolTip('Weport')
+    tray.setToolTip('聊迹')
     const menu = Menu.buildFromTemplate([
       {
         label: '显示主窗口',
@@ -1774,7 +1831,9 @@ function registerIpcHandlers() {
   })
 
   // 配置
-  ipcMain.handle('config:get', (_e, key: string) => (configService as any)?.get(key))
+  ipcMain.handle('config:get', (_e, key: string) => (
+    key === 'exportPath' ? ensureConfiguredExportPath() : (configService as any)?.get(key)
+  ))
   ipcMain.handle('config:set', async (_e, key: string, value: unknown) => {
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
@@ -1966,6 +2025,7 @@ function registerIpcHandlers() {
     return { success: true }
   })
   ipcMain.handle('chat:getSessions', () => chatService.getSessions())
+  ipcMain.handle('chat:getContacts', (_e, options?: { lite?: boolean }) => chatService.getContacts(options))
   ipcMain.handle('chat:markAllSessionsRead', () => chatService.markAllSessionsRead())
   ipcMain.handle('chat:getContactAvatar', (_e, username: string, chatroomId?: string) =>
     chatService.getContactAvatar(String(username || ''), chatroomId ? String(chatroomId) : undefined))
@@ -1973,8 +2033,103 @@ function registerIpcHandlers() {
     chatService.enrichSessionsContactInfo((usernames || []).map(String), options))
   ipcMain.handle('chat:getSessionStatuses', (_e, usernames: string[]) =>
     chatService.getSessionStatuses((usernames || []).map(String)))
-  ipcMain.handle('chat:getNewMessages', (_e, sessionId: string, minTime: number, limit?: number) =>
-    chatService.getNewMessages(String(sessionId || ''), Number(minTime || 0), limit || 50))
+  ipcMain.handle('chat:getMessages', (_e, sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+    chatService.getMessages(
+      String(sessionId || ''),
+      Math.max(0, Number(offset || 0)),
+      Math.max(1, Number(limit || 50)),
+      Math.max(0, Number(startTime || 0)),
+      Math.max(0, Number(endTime || 0)),
+      ascending === true,
+    ))
+  ipcMain.handle('chat:getLatestMessages', (_e, sessionId: string, limit?: number) =>
+    chatService.getLatestMessages(String(sessionId || ''), Math.max(1, Number(limit || 50))))
+  ipcMain.handle('chat:getMessagesAround', (_e, sessionId: string, target: { localId?: number; createTime: number; messageKey?: string }, totalContextCount?: number) =>
+    chatService.getMessagesAround(String(sessionId || ''), target, Math.max(1, Number(totalContextCount || 60))))
+  ipcMain.handle('chat:getNewMessages', (_e, sessionId: string, minTime: number, limit?: number, cursor?: { createTime?: number; sortSeq?: number; localId?: number; serverId?: number | string; serverIdRaw?: string }) =>
+    chatService.getNewMessages(String(sessionId || ''), Number(minTime || 0), limit || 50, cursor))
+  ipcMain.handle('chat:getMessageDates', (_e, sessionId: string) =>
+    chatService.getMessageDates(String(sessionId || '')))
+  ipcMain.handle('chat:getMessageDateCounts', (_e, sessionId: string) =>
+    chatService.getMessageDateCounts(String(sessionId || '')))
+  ipcMain.handle('chat:searchMessages', (_e, keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) =>
+    chatService.searchMessages(
+      String(keyword || ''),
+      sessionId ? String(sessionId) : undefined,
+      Math.max(1, Number(limit || 80)),
+      Math.max(0, Number(offset || 0)),
+      beginTimestamp ? Number(beginTimestamp) : undefined,
+      endTimestamp ? Number(endTimestamp) : undefined,
+    ))
+  ipcMain.handle('chat:getSessionDetailFast', (_e, sessionId: string) =>
+    chatService.getSessionDetailFast(String(sessionId || '')))
+  ipcMain.handle('chat:getSessionDetailExtra', (_e, sessionId: string) =>
+    chatService.getSessionDetailExtra(String(sessionId || '')))
+  ipcMain.handle('chat:getMyAvatarUrl', () => chatService.getMyAvatarUrl())
+  ipcMain.handle('chat:getImageData', (_e, sessionId: string, msgId: string, hint?: { imageMd5?: string; imageDatName?: string; createTime?: number; rawContent?: string }) =>
+    chatService.getImageData(String(sessionId || ''), String(msgId || ''), hint))
+  ipcMain.handle('chat:getVoiceData', (_e, sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+    chatService.getVoiceData(
+      String(sessionId || ''),
+      String(msgId || ''),
+      createTime ? Number(createTime) : undefined,
+      serverId,
+      senderWxid ? String(senderWxid) : undefined,
+    ))
+  ipcMain.handle('chat:resolveVoiceCache', (_e, sessionId: string, msgId: string) =>
+    chatService.resolveVoiceCache(String(sessionId || ''), String(msgId || '')))
+  ipcMain.handle('chat:getVoiceTranscript', (event, sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+    chatService.getVoiceTranscript(
+      String(sessionId || ''),
+      String(msgId || ''),
+      createTime ? Number(createTime) : undefined,
+      (transcript) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('chat:voiceTranscriptPartial', {
+            sessionId: String(sessionId || ''),
+            msgId: String(msgId || ''),
+            createTime,
+            text: transcript,
+          })
+        }
+      },
+      senderWxid ? String(senderWxid) : undefined,
+      serverId,
+    ))
+  ipcMain.handle('chat:preloadSessionVoices', (_e, sessionId: string) =>
+    chatService.preloadSessionVoices(String(sessionId || '')))
+  ipcMain.handle('chat:preloadSessionImages', (_e, sessionId: string) =>
+    chatService.preloadSessionImages(String(sessionId || '')))
+
+  // 视频定位沿用 WeFlow 的 hardlink.db + msg/video 解析逻辑。
+  ipcMain.handle('video:getVideoInfo', async (_e, videoMd5: string, options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) => {
+    try {
+      const result = await videoService.getVideoInfo(String(videoMd5 || ''), options)
+      return {
+        success: true,
+        ...result,
+        // 渲染进程不能直接读取绝对路径，统一通过只读本地媒体协议流式播放。
+        videoUrl: result.videoUrl ? toProtocolUrl(result.videoUrl) : undefined,
+      }
+    } catch (error) {
+      return { success: false, exists: false, error: String(error) }
+    }
+  })
+  ipcMain.handle('video:parseVideoMd5', (_e, content: string) => {
+    try {
+      return { success: true, md5: videoService.parseVideoMd5(String(content || '')) }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  // 本地语音识别模型；下载进度仅回传给发起下载的窗口。
+  ipcMain.handle('whisper:downloadModel', (event) =>
+    voiceTranscribeService.downloadModel((progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('whisper:downloadProgress', progress)
+    }))
+  ipcMain.handle('whisper:cancelDownloadModel', () => ({ success: voiceTranscribeService.cancelModelDownload() }))
+  ipcMain.handle('whisper:getModelStatus', () => voiceTranscribeService.getModelStatus())
 
   // 防撤回（WeFlow 式：会话级 WCDB 触发器）
   ipcMain.handle('chat:getAntiRevokeSessions', () => chatService.getAntiRevokeSessions())
@@ -1986,6 +2141,93 @@ function registerIpcHandlers() {
     chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String)))
 
   // 导出
+  ipcMain.handle('export:exportContacts', (_e, outputDir: string, options: ContactExportOptions) => {
+    const normalizedOutputDir = String(outputDir || '').trim()
+    if (!normalizedOutputDir) return { success: false, error: '未指定输出目录' }
+    return contactExportService.exportContacts(normalizedOutputDir, options || { format: 'csv' })
+  })
+  ipcMain.handle('export:getExportStats', async (_e, rawSessionIds: string[], rawOptions?: any) => {
+    exportService.setRuntimeConfig({
+      dbPath: configService?.get('dbPath') || '',
+      decryptKey: configService?.get('decryptKey') || '',
+      myWxid: configService?.get('myWxid') || '',
+      resourcesPath: resolveResourcesPath(),
+      appPath: app.getAppPath(),
+      isPackaged: app.isPackaged,
+    })
+
+    let sessionIds = Array.from(new Set((rawSessionIds || [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)))
+    if (sessionIds.length === 0) {
+      const connectResult = await chatService.connect()
+      if (!connectResult.success) throw new Error(connectResult.error || '数据库连接失败')
+      const sessionsResult = await chatService.getSessions()
+      if (!sessionsResult.success || !sessionsResult.sessions) {
+        throw new Error(sessionsResult.error || '获取会话列表失败')
+      }
+      sessionIds = Array.from(new Set((sessionsResult.sessions as Array<{ username: string }>)
+        .map((session) => String(session?.username || '').trim())
+        .filter(Boolean)))
+    }
+
+    if (sessionIds.length === 0) {
+      return { totalMessages: 0, voiceMessages: 0, cachedVoiceCount: 0, needTranscribeCount: 0, mediaMessages: 0, estimatedSeconds: 0, sessions: [] }
+    }
+
+    return exportService.getExportStats(sessionIds, {
+      format: 'pdf',
+      contentType: 'text',
+      exportMedia: false,
+      ...rawOptions,
+    })
+  })
+  ipcMain.handle('export:prepareVoiceTranscripts', async (_e, rawSessionIds: string[], rawOptions?: any) => {
+    exportService.setRuntimeConfig({
+      dbPath: configService?.get('dbPath') || '',
+      decryptKey: configService?.get('decryptKey') || '',
+      myWxid: configService?.get('myWxid') || '',
+      resourcesPath: resolveResourcesPath(),
+      appPath: app.getAppPath(),
+      isPackaged: app.isPackaged,
+    })
+
+    let sessionIds = Array.from(new Set((rawSessionIds || [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)))
+    if (sessionIds.length === 0) {
+      const connectResult = await chatService.connect()
+      if (!connectResult.success) throw new Error(connectResult.error || '数据库连接失败')
+      const sessionsResult = await chatService.getSessions()
+      if (!sessionsResult.success || !sessionsResult.sessions) {
+        throw new Error(sessionsResult.error || '获取会话列表失败')
+      }
+      sessionIds = Array.from(new Set((sessionsResult.sessions as Array<{ username: string }>)
+        .map((session) => String(session?.username || '').trim())
+        .filter(Boolean)))
+    }
+
+    const taskId = `voice-prep-${Date.now()}`
+    const control = exportTaskControlService.createControl(
+      taskId,
+      String(configService?.get('exportPath') || app.getPath('temp'))
+    )
+    const progressEmitter = (progress: any) => {
+      mainWindow?.webContents.send('export:progress', { ...progress, taskId })
+    }
+
+    try {
+      const result = await exportService.prepareVoiceTranscripts(sessionIds, {
+        format: 'pdf',
+        contentType: 'text',
+        exportMedia: false,
+        ...rawOptions,
+      }, progressEmitter, control)
+      return { ...result, taskId }
+    } finally {
+      exportTaskControlService.releaseTask(taskId)
+    }
+  })
   ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, formatOrOptions?: any, legacyOptions?: any) => {
     const root = String(outputRoot || '').trim()
     if (!root) return { success: false, successCount: 0, failCount: 1, error: '未指定输出目录' }
@@ -1993,7 +2235,7 @@ function registerIpcHandlers() {
     // 兼容两种调用：旧 (outputRoot, format, options) 与新 (outputRoot, options)
     const userOptions: any = typeof formatOrOptions === 'string' ? legacyOptions || {} : formatOrOptions || {}
     const fmt = String(
-      userOptions.format || (typeof formatOrOptions === 'string' ? formatOrOptions : '') || 'txt'
+      userOptions.format || (typeof formatOrOptions === 'string' ? formatOrOptions : '') || 'pdf'
     ).trim()
     const formatFolder = EXPORT_FORMAT_FOLDERS[fmt]
     if (!formatFolder) {
@@ -2105,11 +2347,19 @@ function registerIpcHandlers() {
       if (fmt === 'txt' || fmt === 'json') {
         writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
       }
+      const exportedDirectories = Array.from(new Set(
+        Object.values(result.sessionOutputPaths || {})
+          .map((filePath) => String(filePath || '').trim())
+          .filter(Boolean)
+          .map((filePath) => dirname(filePath))
+      ))
       return {
         ...result,
         success: result.success && result.failCount === 0,
         formatFolder,
         formatDir: outDir,
+        // 文件集中在同一层时直接进入所在目录；分散到多个会话目录时进入格式根目录。
+        outputDirectory: exportedDirectories.length === 1 ? exportedDirectories[0] : outDir,
         taskId,
       }
     } catch (e) {
@@ -2568,7 +2818,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     const payload = {
       sessionId: 'weport-test',
       channel: 'message',
-      title: 'Weport 测试通知',
+      title: '聊迹测试通知',
       content: '这是一条测试通知 · 弹窗为独立置顶窗口',
       timestamp: Math.floor(Date.now() / 1000),
     }
@@ -2669,6 +2919,8 @@ function demoConfigValue(key: string): unknown {
       return false
     case 'antiRevokeAutoApplyNewGroups':
       return false
+    case 'exportDefaultDateRange':
+      return { version: 1, preset: 'all', useAllTime: true }
     default:
       return (configService as any)?.get(key)
   }
@@ -2796,6 +3048,141 @@ function demoAntiRevokeSessions() {
   ]
 }
 
+function decryptChromiumSafeValue(stored: unknown, masterKey: Buffer): string | null {
+  const text = String(stored || '')
+  if (!text) return null
+  if (!text.startsWith('safe:')) return text
+  try {
+    const payload = Buffer.from(text.slice(5), 'base64')
+    if (payload.subarray(0, 3).toString('ascii') !== 'v10' || payload.length <= 31) return null
+    const nonce = payload.subarray(3, 15)
+    const ciphertext = payload.subarray(15, -16)
+    const authTag = payload.subarray(-16)
+    const decipher = createDecipheriv('aes-256-gcm', masterKey, nonce)
+    decipher.setAuthTag(authTag)
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+  } catch {
+    return null
+  }
+}
+
+function loadChromiumSafeStorageKey(localStatePath: string): Buffer | null {
+  if (process.platform !== 'win32' || !existsSync(localStatePath)) return null
+  try {
+    const localState = JSON.parse(readFileSync(localStatePath, 'utf8')) as Record<string, any>
+    const wrapped = Buffer.from(String(localState.os_crypt?.encrypted_key || ''), 'base64')
+    if (wrapped.subarray(0, 5).toString('ascii') !== 'DPAPI') return null
+
+    // Chromium 的 Local State 主密钥由当前 Windows 用户的 DPAPI 保护。
+    // 密文通过 stdin 传入，避免任何密钥材料出现在进程命令行或日志中。
+    const script = '$raw=[Console]::In.ReadToEnd(); Add-Type -AssemblyName System.Security; $data=[Convert]::FromBase64String($raw); $plain=[Security.Cryptography.ProtectedData]::Unprotect($data,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String($plain))'
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      input: wrapped.subarray(5).toString('base64'),
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 4096,
+    })
+    if (result.status !== 0 || !String(result.stdout || '').trim()) return null
+    const masterKey = Buffer.from(String(result.stdout).trim(), 'base64')
+    return masterKey.length === 32 ? masterKey : null
+  } catch {
+    return null
+  }
+}
+
+/** 当前账号缺少图片密钥时，优先迁移 WeFlow 已验真的密钥，再走其缓存提取逻辑。 */
+async function bootstrapMissingImageKeys(): Promise<void> {
+  const store = configService
+  if (!store || process.platform !== 'win32') return
+
+  const currentWxid = String(store.get('myWxid') || '').trim()
+  const currentDbPath = String(store.get('dbPath') || '').trim()
+  const currentKeys = store.getImageKeysForCurrentWxid()
+  if (!currentWxid || !currentDbPath || String(currentKeys.aesKey || '').trim()) return
+
+  try {
+    const weflowDir = join(app.getPath('appData'), 'weflow')
+    const referenceConfigPath = join(weflowDir, 'WeFlow-config.json')
+    if (existsSync(referenceConfigPath)) {
+      const reference = JSON.parse(readFileSync(referenceConfigPath, 'utf8')) as Record<string, any>
+      const sameAccount = String(reference.myWxid || '').trim() === currentWxid
+      const referenceDbPath = String(reference.dbPath || '').trim()
+      const sameDbPath = !referenceDbPath || referenceDbPath.toLowerCase() === currentDbPath.toLowerCase()
+      const referenceEntry = reference.wxidConfigs?.[currentWxid] || {}
+      const masterKey = sameAccount && sameDbPath
+        ? loadChromiumSafeStorageKey(join(weflowDir, 'Local State'))
+        : null
+      if (masterKey) {
+        const imageAesKey = decryptChromiumSafeValue(referenceEntry.imageAesKey || reference.imageAesKey, masterKey)
+        const imageXorKey = Number(decryptChromiumSafeValue(referenceEntry.imageXorKey ?? reference.imageXorKey, masterKey))
+        if (imageAesKey?.length === 16 && Number.isInteger(imageXorKey) && imageXorKey >= 0 && imageXorKey <= 255) {
+          const configs = store.get('wxidConfigs') || {}
+          store.set('wxidConfigs', {
+            ...configs,
+            [currentWxid]: {
+              ...(configs[currentWxid] || {}),
+              imageAesKey,
+              imageXorKey,
+              updatedAt: Date.now(),
+            },
+          })
+          console.log('[Weport] 已安全迁移当前账号的 WeFlow 图片密钥')
+          return
+        }
+      }
+    }
+
+    const result = await new KeyService().autoGetImageKey(currentDbPath, undefined, currentWxid)
+    // 自动流程只接受经 *_t.dat 模板确认属于当前账号的密钥，避免多账号串用。
+    if (!result.success || result.verified !== true || typeof result.xorKey !== 'number' || !result.aesKey) return
+
+    const configs = store.get('wxidConfigs') || {}
+    store.set('wxidConfigs', {
+      ...configs,
+      [currentWxid]: {
+        ...(configs[currentWxid] || {}),
+        imageAesKey: result.aesKey,
+        imageXorKey: result.xorKey,
+        updatedAt: Date.now(),
+      },
+    })
+    console.log('[Weport] 已自动补齐当前账号的图片密钥')
+  } catch (error) {
+    console.warn('[Weport] 自动补齐图片密钥失败:', error)
+  }
+}
+
+function demoChatMessages(sessionId = 'family@chatroom'): Array<Record<string, unknown>> {
+  const now = Math.floor(Date.now() / 1000)
+  const avatar = (name: string) => demoSnsAvatarUrl(name)
+  const rows: Array<Record<string, unknown>> = [
+    { localType: 10000, parsedContent: '你邀请“张伟”加入了群聊', isSend: 0, senderUsername: null },
+    { localType: 1, parsedContent: '周末天气不错，我们去郊野公园野餐吧？', isSend: 0, senderUsername: 'wxid_lina', senderDisplayName: '李娜', senderAvatarUrl: avatar('李') },
+    { localType: 1, parsedContent: '可以呀，我来准备水果和饮料 🍉', isSend: 1, senderUsername: DEMO_WXID },
+    { localType: 1, parsedContent: '那我带野餐垫，上午十点老地方见。', isSend: 0, senderUsername: 'wxid_zhangwei', senderDisplayName: '张伟', senderAvatarUrl: avatar('张') },
+    { localType: 3, parsedContent: '[图片]', isSend: 0, senderUsername: 'wxid_lina', senderDisplayName: '李娜', senderAvatarUrl: avatar('李'), cdnThumbUrl: avatar('风景') },
+    { localType: 34, parsedContent: '[语音]', isSend: 1, senderUsername: DEMO_WXID, voiceDurationSeconds: 8 },
+    { localType: 49, parsedContent: '郊野公园周末游玩指南', isSend: 0, senderUsername: 'wxid_zhangwei', senderDisplayName: '张伟', senderAvatarUrl: avatar('张'), appMsgKind: 'link', linkTitle: '郊野公园周末游玩指南', linkUrl: 'https://example.com/park', appMsgDesc: '路线、停车与开放时间' },
+    { localType: 1, parsedContent: '记得给爸妈带上遮阳帽，最近天气还是有点热。[太阳]', isSend: 0, senderUsername: 'wxid_lina', senderDisplayName: '李娜', senderAvatarUrl: avatar('李') },
+    { localType: 1, parsedContent: '收到，我也会提前看一下天气预报。', isSend: 1, senderUsername: DEMO_WXID, quotedSender: '李娜', quotedContent: '记得给爸妈带上遮阳帽' },
+  ]
+  return rows.map((row, index) => ({
+    messageKey: `demo:${sessionId}:${index + 1}`,
+    localId: index + 1,
+    serverId: 10_000 + index,
+    serverIdRaw: String(10_000 + index),
+    localType: 1,
+    createTime: now - (rows.length - index) * 220,
+    sortSeq: index + 1,
+    isSend: 0,
+    senderUsername: 'wxid_lina',
+    parsedContent: '',
+    rawContent: '',
+    sessionId,
+    ...row,
+  }))
+}
+
 function installScreenshotDemoHandlers() {
   const override = (channel: string, handler: (...args: any[]) => unknown) => {
     ipcMain.removeHandler(channel)
@@ -2805,6 +3192,70 @@ function installScreenshotDemoHandlers() {
   override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
   override('dbpath:scanWxids', () => [{ wxid: DEMO_WXID, nickname: '演示账号', modifiedTime: 0, avatarUrl: '' }])
   override('chat:connect', () => ({ success: true }))
+  override('chat:getSessions', () => ({
+    success: true,
+    sessions: demoAntiRevokeSessions().map((session, index) => ({
+      ...session,
+      type: session.username.endsWith('@chatroom') ? 2 : 1,
+      unreadCount: index < 2 ? 3 - index : 0,
+      lastMsgType: 1,
+      avatarUrl: demoSnsAvatarUrl(session.displayName.slice(0, 1)),
+      summary: index === 0 ? '收到，我也会提前看一下天气预报。' : index % 2 === 0 ? '最近一条演示消息' : '暂无新消息',
+      messageCountHint: 1280 - index * 97,
+      sortTimestamp: Math.floor(Date.now() / 1000) - index * 60,
+      lastTimestamp: Math.floor(Date.now() / 1000) - index * 60,
+    })),
+  }))
+  override('chat:enrichSessionsContactInfo', (_e, usernames: string[]) => ({
+    success: true,
+    contacts: Object.fromEntries((usernames || []).map((username) => [username, {
+      displayName: demoAntiRevokeSessions().find((session) => session.username === username)?.displayName || username,
+      avatarUrl: demoSnsAvatarUrl(username.slice(0, 1)),
+    }])),
+  }))
+  override('chat:markAllSessionsRead', () => ({ success: true }))
+  override('chat:getLatestMessages', (_e, sessionId: string) => ({ success: true, messages: demoChatMessages(sessionId), hasMore: false, nextOffset: 9 }))
+  override('chat:getMessages', (_e, sessionId: string) => ({ success: true, messages: demoChatMessages(sessionId), hasMore: false, nextOffset: 9 }))
+  override('chat:getMessagesAround', (_e, sessionId: string, target: Record<string, unknown>) => {
+    const messages = demoChatMessages(sessionId)
+    const index = Math.max(0, messages.findIndex((message) => message.localId === target.localId))
+    return { success: true, before: messages.slice(Math.max(0, index - 3), index), after: messages.slice(index + 1, index + 4), requested: 6 }
+  })
+  override('chat:getNewMessages', () => ({ success: true, messages: [] }))
+  override('chat:getMessageDates', () => ({ success: true, dates: ['2026-09-02', '2026-09-01', '2026-08-31'] }))
+  override('chat:getMessageDateCounts', () => ({ success: true, counts: { '2026-09-02': 9, '2026-09-01': 18, '2026-08-31': 12 } }))
+  override('chat:searchMessages', (_e, keyword: string, sessionId?: string) => ({
+    success: true,
+    messages: demoChatMessages(sessionId || 'family@chatroom').filter((message) => String(message.parsedContent || '').includes(keyword) || keyword.length > 0).slice(0, 5),
+  }))
+  override('chat:getSessionDetailFast', (_e, sessionId: string) => ({ success: true, detail: { wxid: sessionId, displayName: '一家人', nickName: '一家人', avatarUrl: demoSnsAvatarUrl('家'), messageCount: 1280 } }))
+  override('chat:getSessionDetailExtra', () => ({ success: true, detail: { firstMessageTime: 1_650_000_000, latestMessageTime: Math.floor(Date.now() / 1000), messageTables: [{ dbName: 'message_0.db', tableName: 'Msg_1A2B', count: 1280 }] } }))
+  override('chat:getMyAvatarUrl', () => ({ success: true, avatarUrl: demoSnsAvatarUrl('我') }))
+  override('chat:getImageData', () => ({ success: false, error: '演示图片使用缩略图' }))
+  override('chat:getVoiceData', () => ({ success: false, error: '演示模式' }))
+  override('chat:preloadSessionVoices', () => ({ success: true, total: 12, prepared: 12 }))
+  override('chat:preloadSessionImages', () => ({ success: true, total: 28, prepared: 28, failed: 0 }))
+  override('whisper:getModelStatus', () => ({ success: true, exists: true, valid: true, modelDir: 'demo' }))
+  override('export:getExportStats', (_e, sessionIds: string[]) => {
+    const ids = Array.isArray(sessionIds) && sessionIds.length > 0
+      ? sessionIds
+      : demoAntiRevokeSessions().map((session) => session.username)
+    return {
+      totalMessages: ids.length * 128,
+      voiceMessages: ids.length * 4,
+      cachedVoiceCount: ids.length * 2,
+      needTranscribeCount: ids.length * 2,
+      mediaMessages: ids.length * 12,
+      estimatedSeconds: ids.length * 4,
+      sessions: ids.map((sessionId) => ({ sessionId, displayName: sessionId, totalCount: 128, voiceCount: 4 })),
+    }
+  })
+  override('export:prepareVoiceTranscripts', (_e, sessionIds: string[]) => {
+    const total = Math.max(0, (Array.isArray(sessionIds) ? sessionIds.length : 0) * 2)
+    return { success: true, total, processed: total, converted: total, failed: 0, taskId: 'voice-prep-demo' }
+  })
+  override('video:getVideoInfo', () => ({ success: true, exists: false }))
+  override('video:parseVideoMd5', () => ({ success: true }))
   override('chat:getAntiRevokeSessions', () => ({ sessions: demoAntiRevokeSessions() }))
   override('chat:checkAntiRevokeTriggers', () => ({
     rows: ['family@chatroom', 'parents@chatroom'].map((sessionId) => ({
@@ -3740,51 +4191,28 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   await wc.executeJavaScript(`(() => { const b = document.querySelector('.member-dialog .wp-dialog-head .icon-btn-ghost'); b?.click(); return !!b; })()`)
   await sleep(800)
 
-  // 7) 设置页：色彩主题切换（colorful ↔ mono）+ 主题持久化
+  // 7) 设置页：保留启动、备份和本地服务设置，主题与关于模块已按产品要求移除。
   const settingsTab = await clickTab('设置')
   log(`settingsTab = ${JSON.stringify(settingsTab)}`)
   if (!settingsTab?.ok) { results.fail = 'settings tab missing'; log('FAIL: 未找到设置页签'); app.exit(1); return }
   await dumpDom('settings', {
-    themeCards: '.theme-card',
-    themeChecks: '.theme-card-check',
     startupRows: '.setting-row',
-    swatches: '.theme-swatches span',
+    panels: '.workspace .panel',
   })
   const settingsDom = results.settings as Record<string, any>
-  if ((settingsDom.themeCards?.count ?? 0) < 2) { results.fail = 'theme cards missing'; log('FAIL: 主题卡片不足 2 个'); app.exit(1); return }
-  const themeToggle = await wc.executeJavaScript(`
+  const removedSettingsModules = await wc.executeJavaScript(`
     (() => {
-      const cards = Array.from(document.querySelectorAll('.theme-card'));
-      const mono = cards.find((c) => c.textContent.includes('黑白'));
-      mono?.click();
-      return !!mono;
+      const panels = Array.from(document.querySelectorAll('.workspace .panel'));
+      return {
+        hasColorTheme: panels.some((panel) => panel.textContent.includes('色彩主题')),
+        hasAbout: panels.some((panel) => panel.textContent.includes('版本与更新')),
+      };
     })()
   `)
-  await sleep(800)
-  const themeApplied = await wc.executeJavaScript(`
-    (() => ({
-      theme: document.documentElement.dataset.theme || null,
-      saved: null,
-    }))()
-  `)
-  themeApplied.saved = await wc.executeJavaScript(`window.electronAPI.config.get('colorMode').then((v) => v || null)`)
-  log(`themeToggle = ${JSON.stringify(themeToggle)} applied = ${JSON.stringify(themeApplied)}`)
-  results.themeApplied = themeApplied
-  // 演示模式 config:set 被吞（不落盘），因此只断言主题已应用；保存逻辑由真实模式验证
-  if (themeApplied.theme !== 'mono') {
-    results.fail = 'theme mono not applied'
-    log('FAIL: 黑白主题未生效')
-    app.exit(1)
-    return
-  }
-  await wc.executeJavaScript(`(() => { const cards = Array.from(document.querySelectorAll('.theme-card')); const c = cards.find((x) => x.textContent.includes('浅蓝')); c?.click(); return !!c; })()`)
-  await sleep(800)
-  const themeBack = await wc.executeJavaScript(`document.documentElement.dataset.theme || null`)
-  log(`themeBack = ${themeBack}`)
-  results.themeBack = themeBack
-  if (themeBack !== 'colorful') {
-    results.fail = 'theme colorful not restored'
-    log('FAIL: 浅蓝主题未恢复')
+  results.removedSettingsModules = removedSettingsModules
+  if ((settingsDom.startupRows?.count ?? 0) < 1 || removedSettingsModules.hasColorTheme || removedSettingsModules.hasAbout) {
+    results.fail = 'settings modules mismatch'
+    log(`FAIL: 设置页模块状态异常 ${JSON.stringify(removedSettingsModules)}`)
     app.exit(1)
     return
   }
@@ -3959,6 +4387,8 @@ async function runScreenshotMode() {
       '.ranking-name',
       '.export-session-copy strong',
       '.export-session-copy > span',
+      '.wp-session-identity-name',
+      '.wp-session-identity-secondary',
       '.author-name',
       '.sns-author-name',
       '.post-text',
@@ -4140,35 +4570,146 @@ async function runScreenshotMode() {
     }
   }
 
-  // 2) 导出数据页
+  // 2) 聊天页（会话侧栏 + 消息时间线）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await clickTab('聊天')
+      if (await waitForDom('.chat-session-row')) {
+        await waitForDom('.chat-message-row')
+        await sleep(500)
+        const chatState = await mainWindow.webContents.executeJavaScript(`(() => {
+          const first = document.querySelector('.chat-session-row .chat-session-topline strong')?.textContent?.trim() || '';
+          const shell = document.querySelector('.chat-shell')?.getBoundingClientRect();
+          const sidebar = document.querySelector('.chat-session-sidebar')?.getBoundingClientRect();
+          const main = document.querySelector('.chat-main')?.getBoundingClientRect();
+          return { first, rows: document.querySelectorAll('.chat-message-row').length, shellWidth: shell?.width || 0, sidebarWidth: sidebar?.width || 0, mainWidth: main?.width || 0 };
+        })()`, true)
+        if (chatState?.first !== '一家人' || chatState?.rows < 5 || chatState?.sidebarWidth < 260 || chatState?.mainWidth < 400) {
+          throw new Error(`聊天页布局或最新会话排序异常: ${JSON.stringify(chatState)}`)
+        }
+        await saveStable(mainWindow, 'chat.png')
+        await dumpRects('chat-rects.json', [
+          '.chat-shell', '.chat-session-sidebar', '.chat-session-row', '.chat-message-header', '.chat-message-row',
+        ])
+
+        // 关键交互冒烟：详情、群成员、会话内搜索、日期跳转入口均使用真实 React 事件链。
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-header-actions button[title="会话详情"]')?.click(); true`,
+          true,
+        )
+        if (!await waitForDom('.chat-detail-content dl')) throw new Error('聊天会话详情未渲染')
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-side-panel-head button')?.click(); true`,
+          true,
+        )
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-header-actions button[title="群成员"]')?.click(); true`,
+          true,
+        )
+        if (!await waitForDom('.chat-member-row')) throw new Error('聊天群成员面板未渲染')
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-side-panel-head button')?.click(); document.querySelector('.chat-header-actions button[title^="搜索当前会话"]')?.click(); true`,
+          true,
+        )
+        if (!await waitForDom('.chat-in-session-search input')) throw new Error('聊天会话内搜索未打开')
+        await mainWindow.webContents.executeJavaScript(`(() => {
+          const input = document.querySelector('.chat-in-session-search input');
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+          if (!input || !setter) return false;
+          setter.call(input, '野餐');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.closest('form')?.requestSubmit();
+          return true;
+        })()`, true)
+        if (!await waitForDom('.chat-in-session-results button')) throw new Error('聊天会话内搜索无结果')
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-in-session-search form button[aria-label="关闭搜索"]')?.click(); document.querySelector('.chat-header-actions button[title="跳转到日期"]')?.click(); true`,
+          true,
+        )
+        if (!await waitForDom('.chat-date-popover select option')) throw new Error('聊天日期跳转数据未渲染')
+        await mainWindow.webContents.executeJavaScript(
+          `document.querySelector('.chat-date-popover > div:first-child button')?.click(); true`,
+          true,
+        )
+      } else {
+        log('WARN [screenshot] chat tab did not render')
+      }
+    } catch (e) {
+      log('WARN [screenshot] chat capture failed:', e)
+    }
+  }
+
+  // 3) 导出数据页
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await clickTab('导出数据')
       if (await waitForDom('.format-grid')) {
         await sleep(500)
-        const scopePopupOpened = await mainWindow.webContents
-          .executeJavaScript(
-            `(() => { const trigger = document.querySelector('.export-scope-trigger'); if (!trigger) return false; trigger.click(); return true })()`,
+        const scopeSidebarReady = await waitForDom('.export-session-sidebar', isRealScreenshotMode ? 120 : 40)
+        if (scopeSidebarReady) {
+          await waitForDom('.export-session-row', isRealScreenshotMode ? 120 : 40)
+          const firstSessionName = await mainWindow.webContents.executeJavaScript(
+            `document.querySelector('.export-session-row .wp-session-identity-name')?.textContent?.trim() || ''`,
             true,
           )
-          .catch(() => false)
-        const scopePopupReady = scopePopupOpened && await waitForDom('.export-session-popover', isRealScreenshotMode ? 120 : 40)
-        if (scopePopupReady) {
-          await dumpRects('export-scope-rects.json', ['.export-scope-trigger', '.export-session-popover'])
-          await mainWindow.webContents
-            .executeJavaScript(
-              `(() => { const close = document.querySelector('[aria-label="关闭导出范围菜单"]'); close?.click(); return !!close })()`,
-              true,
-            )
-            .catch(() => false)
+          if (firstSessionName !== '一家人') {
+            throw new Error(`导出会话未按最近活跃时间排序: first=${JSON.stringify(firstSessionName)}`)
+          }
+          await dumpRects('export-scope-rects.json', [
+            '.export-page-layout', '.export-session-sidebar', '.export-config-panel', '.export-session-row',
+          ])
+          await saveStable(mainWindow, 'export-scope.png')
+
+          mainWindow.setSize(930, 640)
+          await sleep(600)
+          const narrowLayout = await mainWindow.webContents.executeJavaScript(`(() => {
+            const side = document.querySelector('.export-session-sidebar')?.getBoundingClientRect()
+            const config = document.querySelector('.export-config-panel')?.getBoundingClientRect()
+            return side && config ? {
+              sideWidth: Math.round(side.width),
+              configWidth: Math.round(config.width),
+              overlap: side.right > config.left,
+              viewport: window.innerWidth,
+            } : null
+          })()`, true)
+          if (!narrowLayout || narrowLayout.sideWidth < 270 || narrowLayout.configWidth < 540 || narrowLayout.overlap) {
+            throw new Error(`导出页窄窗口双栏布局异常: ${JSON.stringify(narrowLayout)}`)
+          }
+          await dumpRects('export-narrow-rects.json', [
+            '.export-page-layout', '.export-session-sidebar', '.export-config-panel', '.export-session-row',
+          ])
+          await saveStable(mainWindow, 'export-narrow.png')
+          mainWindow.setSize(1080, 720)
+          await sleep(600)
         } else {
-          log('FAIL [screenshot] 导出范围弹出菜单未打开')
+          log('FAIL [screenshot] 导出会话常驻侧栏未渲染')
         }
         await saveStable(mainWindow, 'export.png')
         await dumpRects('export-rects.json', [
-          '.format-chip.layout-chip', '.format-grid .format-chip', '.media-check',
+          '.format-chip.layout-chip', '.format-grid .format-chip', '.export-date-range-panel', '.export-date-preset', '.media-check',
           '.opt-panel .seg', '.export-meta .row', '.progress', '.primary-btn.block',
         ])
+        // 日期范围回归：切换到自定义后必须出现两个日期输入，并单独留一张可目视检查的截图。
+        const customDateRangeReady = await mainWindow.webContents.executeJavaScript(`(() => {
+          const buttons = Array.from(document.querySelectorAll('.export-date-preset'));
+          const custom = buttons.at(-1);
+          if (!(custom instanceof HTMLElement)) return false;
+          custom.click();
+          document.querySelector('.export-date-range-panel')?.scrollIntoView({ block: 'center' });
+          return true;
+        })()`, true)
+        if (!customDateRangeReady || !await waitForDom('.export-custom-date-range input')) {
+          throw new Error('导出日期范围切换到自定义后未显示日期输入')
+        }
+        const customDateInputCount = await mainWindow.webContents.executeJavaScript(
+          `document.querySelectorAll('.export-custom-date-range input[type="date"]').length`,
+          true,
+        )
+        if (customDateInputCount !== 2) {
+          throw new Error(`导出自定义日期输入数量异常: ${customDateInputCount}`)
+        }
+        await sleep(350)
+        await saveStable(mainWindow, 'export-date-range.png')
         // 滚动到底部，捕获导出按钮 + 进度条区域（export-bottom.png + 滚动值）
         const scrollTop = await mainWindow.webContents
           .executeJavaScript(
@@ -4187,25 +4728,6 @@ async function runScreenshotMode() {
       }
     } catch (e) {
       log('WARN [screenshot] export capture failed:', e)
-    }
-  }
-
-  // 3) 防撤回页（演示会话 + 已安装状态）
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      await clickTab('防撤回')
-      if (await waitForDom('.anti-revoke-list')) {
-        await sleep(500)
-        await saveStable(mainWindow, 'antirecall.png')
-        await dumpRects('antirecall-rects.json', [
-          '.anti-revoke-list .account-item', '.anti-revoke-list .badge',
-          '.panel-head .primary-btn', '.count-pill',
-        ])
-      } else {
-        log('WARN [screenshot] antirecall tab did not render')
-      }
-    } catch (e) {
-      log('WARN [screenshot] antirecall capture failed:', e)
     }
   }
 
@@ -4233,6 +4755,26 @@ async function runScreenshotMode() {
         await dumpRects('notifications-rects.json', [
           '.switch-label', '.status-dot', '.check-row', '.checklist', '.setting-row',
         ])
+        const filterOpened = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => { const button = Array.from(document.querySelectorAll('button')).find((item) => item.textContent?.includes('配置会话过滤')); button?.click(); return !!button })()`,
+            true,
+          )
+          .catch(() => false)
+        if (filterOpened && await waitForDom('.notify-filter-list')) {
+          await waitForDom('.notify-row')
+          await sleep(500)
+          await saveStable(mainWindow, 'notifications-filter.png')
+          await dumpRects('notifications-filter-rects.json', ['.modal-wide', '.notify-filter-list', '.notify-row'])
+          await mainWindow.webContents
+            .executeJavaScript(
+              `(() => { const modal = document.querySelector('[aria-labelledby="filter-title"]'); const cancel = Array.from(modal?.querySelectorAll('button') || []).find((item) => item.textContent?.trim() === '取消'); cancel?.click(); return !!cancel })()`,
+              true,
+            )
+            .catch(() => false)
+        } else {
+          log('WARN [screenshot] 会话通知过滤弹窗未打开')
+        }
       } else {
         log('WARN [screenshot] notifications tab did not render')
       }
@@ -4241,67 +4783,7 @@ async function runScreenshotMode() {
     }
   }
 
-  // 5) WeportAI 页（演示会话由截图演示处理器注入，含工具调用与笔记面板）
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      await clickTab('WeportAI')
-      const probe = () =>
-        mainWindow?.webContents
-          .executeJavaScript(`1 + 1`, true)
-          .then((v) => v === 2)
-          .catch(() => false)
-      // CI 上该面板首次挂载可能让渲染进程忙很久（软渲染），放宽等待
-      const shellMounted = await waitForDom('.ai-shell', 100)
-      const messageMounted = shellMounted && await waitForDom('.ai-msg', 100)
-      // A real profile may have no AI conversation/provider yet. The shell is
-      // still the user's actual WeportAI screen and is a valid README capture.
-      const mounted = shellMounted && (messageMounted || isRealScreenshotMode)
-      log(`[screenshot] AI tab shell=${shellMounted} messages=${messageMounted} mounted=${mounted} rendererProbe=${await probe()}`)
-      if (mounted) {
-        await sleep(500)
-        const ok = await saveStable(mainWindow, 'ai.png', 12, 30)
-        if (!ok) {
-          log('WARN [screenshot] ai.png first attempt failed, remounting AI panel...')
-          await clickTab('设置')
-          await sleep(800)
-          await clickTab('WeportAI')
-          if ((await waitForDom('.ai-shell', 100)) && (await waitForDom('.ai-msg', 100))) {
-            await sleep(500)
-            await saveStable(mainWindow, 'ai.png', 12, 30)
-          }
-        }
-        await dumpRects('ai-rects.json', [
-          '.ai-input', '.ai-send', '.ai-chat-item', '.ai-ws-note', '.ai-ws-usage', '.ai-msg', '.ai-ws-body',
-        ])
-      } else {
-        log('WARN [screenshot] AI tab did not render')
-        // 注意：executeJavaScript 解析的是纯 JS —— 字符串里不能带 TS 类型注解，
-        // 否则探针本身报 SyntaxError（曾把真实原因掩盖成页面脚本错误）
-        const aiState = await mainWindow?.webContents
-          .executeJavaScript(
-            `(() => {
-              const tab = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes('WeportAI'))
-              const workspace = document.querySelector('.workspace')
-              const active = document.querySelector('.tab[data-active="true"]')
-              return JSON.stringify({
-                tabFound: !!tab,
-                tabDisabled: tab ? tab.disabled : null,
-                activeTab: active ? (active.textContent || '').trim() : null,
-                wsChildren: workspace ? Array.from(workspace.children).map((c) => (c.className || c.tagName).toString()).slice(0, 4) : null,
-                wsText: workspace ? (workspace.textContent || '').slice(0, 120) : null
-              })
-            })()`,
-            true,
-          )
-          .catch(() => 'eval-failed')
-        log('WARN [screenshot] AI tab state:', aiState)
-      }
-    } catch (e) {
-      log('WARN [screenshot] AI capture failed:', e)
-    }
-  }
-
-  // 6) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
+  // 5) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
   try {
     let payload = {
       sessionId: 'family@chatroom',
@@ -4495,8 +4977,8 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(500)
   }, 1600)
-  // 7.6) 设置（主题选择 + 启动行为）
-  await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
+  // 7.6) 设置（启动行为、备份与本地服务）
+  await captureV09('settings', 'settings.png', ['.setting-row'], async () => {
     await clickTab('设置')
   })
 
@@ -5193,7 +5675,7 @@ function installMainProcessErrorHandlers() {
       try {
         const logPath = fatalLog || join(app.getPath('logs'), 'fatal.log')
         dialog.showErrorBox(
-          'Weport 遇到内部错误',
+          '聊迹遇到内部错误',
           `主进程出现未捕获异常，应用即将退出。\n\n${errorText(error).slice(0, 1200)}\n\n详细日志：${logPath}`
         )
       } catch {
@@ -5297,7 +5779,11 @@ function startApp() {
             return new Response('Not Found', { status: 404 })
           }
           const fileUrl = pathToFileURL(rawPath).toString()
-          return await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true })
+          return await net.fetch(fileUrl, {
+            bypassCustomProtocolHandlers: true,
+            // video/audio 元素会发送 Range 请求；转发请求头才能流式加载和拖动进度。
+            headers: request.headers,
+          })
         } catch {
           return new Response('Not Found', { status: 404 })
         }
@@ -5342,6 +5828,10 @@ function startApp() {
     }
 
     migrateLegacySettings()
+    migratePdfExportDefault()
+    migrateExportContentDefaultsV2()
+    ensureConfiguredExportPath()
+    await bootstrapMissingImageKeys()
     syncLaunchAtStartupPreference()
     cleanupLegacyAutostartEntries()
     applyUpdaterChannel()
@@ -5546,6 +6036,7 @@ try { tray?.destroy() } catch { /* noop */ }
     }, 5000)
     forceExitTimer.unref()
     try { chatService.close() } catch { /* noop */ }
+    try { voiceTranscribeService.dispose() } catch { /* noop */ }
     try { await wcdbService.shutdown() } catch { /* noop */ }
   })()
   return shutdownPromise

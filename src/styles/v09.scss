@@ -28,7 +28,7 @@
   flex-shrink: 0;
 }
 .icon-btn-ghost:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-bg-hover);
   color: var(--text);
 }
 .icon-btn-ghost:disabled {
@@ -54,15 +54,15 @@
 }
 
 .wp-dialog {
-  background: var(--panel);
-  border: 1px solid var(--line-strong, #26262c);
-  border-radius: var(--radius);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-dialog);
   padding: 18px;
   min-width: 380px;
   max-width: 680px;
   max-height: 84vh;
   overflow: auto;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-modal);
   animation: wp-pop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2);
 }
 @keyframes wp-pop {
@@ -194,9 +194,9 @@
   align-items: center;
   gap: 14px;
   padding: 12px 16px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line, #1c1c21);
-  border-radius: var(--radius);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-panel);
   flex-wrap: wrap;
 }
 .v09-toolbar-title {
@@ -256,17 +256,15 @@
   flex-wrap: wrap;
 }
 .v09-panel {
-  background: var(--panel);
-  border: 1px solid var(--line, #1c1c21);
-  border-radius: var(--radius);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-panel);
   padding: 14px 16px;
   min-width: 0;
-  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.22s ease;
+  transition: border-color 0.15s ease;
 }
 .v09-panel:hover {
-  border-color: color-mix(in srgb, var(--accent, #fff) 18%, var(--line, #1c1c21));
-  transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  border-color: var(--panel-border);
 }
 .v09-panel-head {
   display: flex;
@@ -288,22 +286,15 @@
   margin-left: auto;
 }
 
-/* chip 激活态（对齐 styles.css 的 data-active 白底） */
+/* 分段与筛选统一使用低透明蓝色选中态，不再反转为白底。 */
 .chip.chip-active {
-  background: #fff;
-  color: #000;
-  border-color: #fff;
-  box-shadow: 0 2px 10px rgba(255, 255, 255, 0.12);
-  animation: chip-activate-pop 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease, box-shadow 0.18s ease;
-}
-@keyframes chip-activate-pop {
-  0% { transform: scale(1); }
-  50% { transform: scale(1.06); }
-  100% { transform: scale(1); }
+  background: var(--color-bg-selected);
+  color: var(--color-accent-hover);
+  border-color: color-mix(in srgb, var(--color-accent) 52%, var(--color-border));
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .chip.chip-active:hover:not(:disabled) {
-  color: #000;
+  color: var(--color-accent-hover);
   transform: none;
 }
 .chip {
@@ -314,20 +305,20 @@
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.12s ease, box-shadow 0.18s ease;
 }
 .chip:active:not(:disabled) {
-  transform: scale(0.94);
+  background: var(--color-bg-elevated);
 }
 .chip:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-/* 通用按压反馈：所有主要按钮按下时轻微缩小（此前只有 hover 变化） */
+/* 通用按压反馈保持颜色变化，避免高密度桌面控件产生跳动。 */
 .primary-btn:active:not(:disabled),
 .ghost-btn:active:not(:disabled),
 .icon-btn:active:not(:disabled),
 .icon-btn-ghost:active:not(:disabled),
 .seg button:active:not(:disabled) {
-  transform: scale(0.95);
+  transform: none;
 }
 .tab:active:not(:disabled) {
   transform: translateY(1px);
@@ -2552,72 +2543,12 @@
 }
 @media (max-width: 640px) {
   .chart-grid-2,
-  .annual-fun-grid,
-  .theme-picker {
+  .annual-fun-grid {
     grid-template-columns: 1fr;
   }
   .stat-cards {
     grid-template-columns: repeat(2, 1fr);
   }
-}
-.theme-picker {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-.theme-card {
-  background: var(--bg);
-  border: 1px solid var(--line, #1c1c21);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text);
-  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
-}
-.theme-card:hover {
-  border-color: var(--line-strong, #2c2c33);
-  transform: translateY(-2px);
-}
-.theme-card-active {
-  border-color: var(--accent, #fff);
-  box-shadow: 0 0 0 1px var(--accent, #fff), 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-.theme-card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-}
-.theme-card-head svg {
-  color: var(--accent, var(--text));
-}
-.theme-card-check {
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--accent-strong, var(--text));
-}
-.theme-swatches {
-  display: flex;
-  gap: 5px;
-}
-.theme-swatches span {
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1.3);
-}
-.theme-card:hover .theme-swatches span {
-  transform: scale(1.12);
-}
-.theme-card-desc {
-  font-size: 11.5px;
-  color: var(--text-faint);
 }
 
 

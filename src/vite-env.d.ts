@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ExportRequest {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
+  format: 'pdf' | 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
   senderUsername?: string
@@ -26,6 +26,169 @@ interface ExportRequest {
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
   sessionIds?: string[]
+}
+
+interface ChatSessionRecord {
+  username: string
+  type: number
+  unreadCount: number
+  summary: string
+  sortTimestamp: number
+  lastTimestamp: number
+  sort_timestamp?: number
+  last_timestamp?: number
+  lastMsgType: number
+  messageCountHint?: number
+  displayName?: string
+  avatarUrl?: string
+  lastMsgSender?: string
+  lastSenderDisplayName?: string
+  selfWxid?: string
+  isFolded?: boolean
+  isMuted?: boolean
+}
+
+type WechatContactType = 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
+
+interface WechatContactInfo {
+  username: string
+  displayName: string
+  remark?: string
+  nickname?: string
+  alias?: string
+  labels?: string[]
+  description?: string
+  detailDescription?: string
+  region?: string
+  gender?: 'male' | 'female' | 'unknown'
+  avatarUrl?: string
+  type: WechatContactType
+  officialAccountKind?: 'subscription' | 'service' | 'enterprise' | 'unknown'
+  officialAccountType?: number
+}
+
+interface ContactExportFields {
+  displayName: boolean
+  remark: boolean
+  nickname: boolean
+  alias: boolean
+  labels: boolean
+  description: boolean
+  detailDescription: boolean
+  region: boolean
+}
+
+interface ContactExportRequest {
+  format: 'json' | 'csv' | 'vcf'
+  fields?: Partial<ContactExportFields>
+  contactTypes?: {
+    friends?: boolean
+    groups?: boolean
+    officials?: boolean
+    formerFriends?: boolean
+    blocked?: boolean
+    other?: boolean
+  }
+  selectedUsernames?: string[]
+}
+
+interface ChatRecordItem {
+  datatype: number
+  sourcename: string
+  sourcetime: string
+  sourceheadurl?: string
+  datadesc?: string
+  datatitle?: string
+  fileext?: string
+  datasize?: number
+  dataurl?: string
+}
+
+interface ChatMessageRecord {
+  messageKey: string
+  localId: number
+  serverId: number
+  serverIdRaw?: string
+  localType: number
+  createTime: number
+  sortSeq: number
+  isSend: number | null
+  senderUsername: string | null
+  senderDisplayName?: string
+  senderAvatarUrl?: string
+  parsedContent: string
+  rawContent: string
+  content?: string
+  sessionId?: string
+  emojiCdnUrl?: string
+  emojiMd5?: string
+  emojiLocalPath?: string
+  emojiThumbUrl?: string
+  emojiEncryptUrl?: string
+  emojiAesKey?: string
+  quotedContent?: string
+  quotedSender?: string
+  imageMd5?: string
+  imageDatName?: string
+  videoMd5?: string
+  aesKey?: string
+  encrypVer?: number
+  cdnThumbUrl?: string
+  voiceDurationSeconds?: number
+  linkTitle?: string
+  linkUrl?: string
+  linkThumb?: string
+  fileName?: string
+  fileSize?: number
+  fileExt?: string
+  fileMd5?: string
+  xmlType?: string
+  appMsgKind?: string
+  appMsgDesc?: string
+  appMsgAppName?: string
+  appMsgSourceName?: string
+  appMsgSourceUsername?: string
+  appMsgThumbUrl?: string
+  appMsgMusicUrl?: string
+  appMsgDataUrl?: string
+  appMsgLocationLabel?: string
+  finderNickname?: string
+  finderUsername?: string
+  finderCoverUrl?: string
+  finderAvatar?: string
+  finderDuration?: number
+  locationLat?: number
+  locationLng?: number
+  locationPoiname?: string
+  locationLabel?: string
+  musicAlbumUrl?: string
+  musicUrl?: string
+  giftImageUrl?: string
+  giftWish?: string
+  giftPrice?: string
+  cardUsername?: string
+  cardNickname?: string
+  cardAvatarUrl?: string
+  transferPayerUsername?: string
+  transferReceiverUsername?: string
+  chatRecordTitle?: string
+  chatRecordList?: ChatRecordItem[]
+}
+
+interface ChatSessionDetailFast {
+  wxid: string
+  displayName: string
+  remark?: string
+  nickName?: string
+  alias?: string
+  avatarUrl?: string
+  messageCount: number
+}
+
+interface ChatSessionDetailExtra {
+  firstMessageTime?: number
+  latestMessageTime?: number
+  messageTables: Array<{ dbName: string; tableName: string; count: number }>
 }
 
 interface ElectronApi {
@@ -97,19 +260,79 @@ interface ElectronApi {
   chat: {
     connect: () => Promise<{ success: boolean; error?: string }>
     close: () => Promise<{ success: boolean }>
-    getSessions: () => Promise<{ success: boolean; sessions?: any[]; error?: string }>
+    getSessions: () => Promise<{ success: boolean; sessions?: ChatSessionRecord[]; error?: string }>
+    getContacts: (options?: { lite?: boolean }) => Promise<{ success: boolean; contacts?: WechatContactInfo[]; error?: string }>
     markAllSessionsRead: () => Promise<{ success: boolean; error?: string }>
     getContactAvatar: (username: string, chatroomId?: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
     enrichSessionsContactInfo: (usernames: string[], options?: any) => Promise<any>
     getSessionStatuses: (usernames: string[]) => Promise<{ map?: Record<string, { isFolded: boolean; isMuted: boolean }> }>
-    getNewMessages: (sessionId: string, minTime: number, limit?: number) => Promise<{ success: boolean; messages?: any[]; error?: string }>
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => Promise<{ success: boolean; messages?: ChatMessageRecord[]; hasMore?: boolean; nextOffset?: number; error?: string }>
+    getLatestMessages: (sessionId: string, limit?: number) => Promise<{ success: boolean; messages?: ChatMessageRecord[]; hasMore?: boolean; nextOffset?: number; error?: string }>
+    getMessagesAround: (sessionId: string, target: { localId?: number; createTime: number; messageKey?: string }, totalContextCount?: number) => Promise<{ success: boolean; before: ChatMessageRecord[]; after: ChatMessageRecord[]; requested: number; error?: string }>
+    getNewMessages: (sessionId: string, minTime: number, limit?: number, cursor?: { createTime?: number; sortSeq?: number; localId?: number; serverId?: number | string; serverIdRaw?: string }) => Promise<{ success: boolean; messages?: ChatMessageRecord[]; error?: string }>
+    getMessageDates: (sessionId: string) => Promise<{ success: boolean; dates?: string[]; error?: string }>
+    getMessageDateCounts: (sessionId: string) => Promise<{ success: boolean; counts?: Record<string, number>; error?: string }>
+    searchMessages: (keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) => Promise<{ success: boolean; messages?: ChatMessageRecord[]; error?: string }>
+    getSessionDetailFast: (sessionId: string) => Promise<{ success: boolean; detail?: ChatSessionDetailFast; error?: string }>
+    getSessionDetailExtra: (sessionId: string) => Promise<{ success: boolean; detail?: ChatSessionDetailExtra; error?: string }>
+    getMyAvatarUrl: () => Promise<{ success: boolean; avatarUrl?: string; error?: string }>
+    getImageData: (sessionId: string, msgId: string, hint?: { imageMd5?: string; imageDatName?: string; createTime?: number; rawContent?: string }) => Promise<{ success: boolean; data?: string; error?: string }>
+    getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) => Promise<{ success: boolean; data?: string; error?: string }>
+    resolveVoiceCache: (sessionId: string, msgId: string) => Promise<{ success: boolean; hasCache: boolean; data?: string }>
+    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) => Promise<{ success: boolean; transcript?: string; error?: string }>
+    onVoiceTranscriptPartial: (callback: (payload: { sessionId: string; msgId: string; createTime?: number; text: string }) => void) => () => void
+    preloadSessionVoices: (sessionId: string) => Promise<{ success: boolean; total?: number; prepared?: number; error?: string }>
+    preloadSessionImages: (sessionId: string) => Promise<{ success: boolean; total?: number; prepared?: number; failed?: number; error?: string }>
     getAntiRevokeSessions: () => Promise<{ success: boolean; sessions?: any[]; error?: string }>
     checkAntiRevokeTriggers: (sessionIds: string[]) => Promise<{ success: boolean; rows?: Array<{ sessionId: string; success: boolean; installed?: boolean; error?: string }>; error?: string }>
     installAntiRevokeTriggers: (sessionIds: string[]) => Promise<{ success: boolean; rows?: Array<{ sessionId: string; success: boolean; alreadyInstalled?: boolean; error?: string }>; error?: string }>
     uninstallAntiRevokeTriggers: (sessionIds: string[]) => Promise<{ success: boolean; rows?: Array<{ sessionId: string; success: boolean; error?: string }>; error?: string }>
   }
+  video: {
+    getVideoInfo: (videoMd5: string, options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) => Promise<{
+      success: boolean
+      exists: boolean
+      videoUrl?: string
+      coverUrl?: string
+      thumbUrl?: string
+      error?: string
+    }>
+    parseVideoMd5: (content: string) => Promise<{ success: boolean; md5?: string; error?: string }>
+  }
+  whisper: {
+    downloadModel: () => Promise<{ success: boolean; modelDir?: string; switchedFromChinesePath?: boolean; originalModelDir?: string; modelPath?: string; tokensPath?: string; error?: string }>
+    cancelDownloadModel: () => Promise<{ success: boolean }>
+    getModelStatus: () => Promise<{ success: boolean; exists?: boolean; valid?: boolean; modelDir?: string; switchedFromChinesePath?: boolean; originalModelDir?: string; modelPath?: string; tokensPath?: string; sizeBytes?: number; error?: string }>
+    onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number; speed?: number }) => void) => () => void
+  }
   export: {
+    getExportStats: (sessionIds: string[], options?: ExportRequest) => Promise<{
+      totalMessages: number
+      voiceMessages: number
+      cachedVoiceCount: number
+      needTranscribeCount: number
+      mediaMessages: number
+      estimatedSeconds: number
+      sessions: Array<{ sessionId: string; displayName: string; totalCount: number; voiceCount: number }>
+    }>
+    prepareVoiceTranscripts: (sessionIds: string[], options?: ExportRequest) => Promise<{
+      success: boolean
+      total: number
+      processed: number
+      converted: number
+      failed: number
+      cancelled?: boolean
+      taskId?: string
+      error?: string
+    }>
     exportSessions: (outputRoot: string, options?: ExportRequest) => Promise<any>
+    exportContacts: (outputDir: string, options: ContactExportRequest) => Promise<{
+      success: boolean
+      successCount?: number
+      outputPath?: string
+      outputDirectory?: string
+      error?: string
+    }>
     cancelTask: (taskId: string) => Promise<{ success: boolean }>
     getExportLog: (outputRoot: string) => Promise<{ path: string; txt: string | null; json: string | null; exists: boolean }>
     clearLibrary: (outputRoot: string) => Promise<{ success: boolean; removed: string[]; error?: string }>

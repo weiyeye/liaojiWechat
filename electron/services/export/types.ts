@@ -63,7 +63,7 @@ export interface ChatLabExport {
 }
 
 export interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
+  format: 'pdf' | 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
   senderUsername?: string
@@ -184,6 +184,16 @@ export interface ExportStatsResult {
   mediaMessages: number
   estimatedSeconds: number
   sessions: Array<{ sessionId: string; displayName: string; totalCount: number; voiceCount: number }>
+}
+
+export interface VoiceTranscriptPreparationResult {
+  success: boolean
+  total: number
+  processed: number
+  converted: number
+  failed: number
+  cancelled?: boolean
+  error?: string
 }
 
 export interface ExportStatsSessionSnapshot {

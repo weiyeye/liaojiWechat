@@ -13,6 +13,7 @@ import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
 import { imageDecryptService } from '../../imageDecryptService'
 import { chatService } from '../../chatService'
+import { voiceTranscribeService } from '../../voiceTranscribeService'
 import { exportRecordService } from '../../exportRecordService'
 import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
@@ -32,9 +33,9 @@ import { resolveGroupNicknameByCandidates, buildGroupNicknameIdCandidates, norma
 import { getAvatarFallback } from '../../export/contacts/avatarHelper';
 import { pathExists, ensureExportDir, copyFileOptimized, hardlinkOrCopyFile } from '../../export/media/fileCopy';
 import { getMediaFileStat } from '../../export/media/attachmentResolver';
+import { createPdfFontCandidates, loadPdfFont as loadPdfDocumentFont } from '../../pdfFont';
 
-// Weport 裁剪：视频/语音转写服务已移除（文本导出不涉及），保留等价兜底。
-// 若未来恢复媒体导出，把以下两个 stub 换回真实服务即可。
+// Weport 裁剪：视频服务仍保留轻量兜底；语音转写已恢复为本项目自己的本地服务。
 const videoServiceStub = {
   parseVideoMd5: (content: string): string => {
     const m = /md5=["']([0-9a-fA-F]{32})["']/i.exec(String(content || ''))
@@ -49,11 +50,6 @@ const videoServiceStub = {
     thumbUrl: '',
   }),
 }
-const voiceTranscribeServiceStub = {
-  getModelStatus: async (): Promise<any> => ({ success: false, exists: false }),
-  downloadModel: async (..._args: unknown[]): Promise<any> => ({ success: false }),
-}
-
 export class ExportContext {
     private configService: ConfigService;
     private runtimeConfig: { dbPath?: string; decryptKey?: string; myWxid?: string; accountDir?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null = null;
@@ -131,6 +127,28 @@ export class ExportContext {
           appPath: config?.appPath,
           isPackaged: config?.isPackaged
         })
+    }
+
+    public loadPdfFont(doc: PDFKit.PDFDocument): string {
+        return loadPdfDocumentFont(doc, createPdfFontCandidates({
+          resourceRoots: [
+            this.runtimeConfig?.resourcesPath,
+            this.runtimeConfig?.appPath ? path.join(this.runtimeConfig.appPath, 'src', 'assets') : undefined,
+            process.env.WCDB_RESOURCES_PATH,
+            path.join(process.cwd(), 'resources')
+          ],
+          platform: process.platform,
+          windowsRoot: process.env.WINDIR || process.env.SystemRoot
+        })).fontName
+    }
+
+    public getAbsoluteExportMediaPath(outputPath: string, relativePath: string): string {
+        return path.resolve(path.dirname(outputPath), relativePath.replace(/[\\/]/g, path.sep))
+    }
+
+    public canEmbedPdfImage(filePath: string): boolean {
+        const ext = path.extname(filePath).toLowerCase()
+        return ext === '.jpg' || ext === '.jpeg' || ext === '.png'
     }
 
     public getConfiguredDbPath(): string {
@@ -5715,38 +5733,51 @@ export class ExportContext {
         }
     }
 
+    /** 返回当前导出范围内仍需转写的语音，供前置任务与各格式导出器共用。 */
+    public getVoiceMessagesNeedingTranscript(sessionId: string, voiceMessages: any[]): any[] {
+        return voiceMessages.filter((message) => (
+          Number(message?.localType) === 34 &&
+          !chatService.hasTranscriptCache(sessionId, String(message.localId), Number(message.createTime))
+        ))
+    }
+
+    /** 仅当当前导出范围里还有未缓存转写的语音时才需要模型。 */
+    public needsVoiceModelForMessages(sessionId: string, voiceMessages: any[]): boolean {
+        return this.getVoiceMessagesNeedingTranscript(sessionId, voiceMessages).length > 0
+    }
+
     /**
-     * 确保语音转写模型已下载
+     * 确保语音转写模型完整可用；UI 会优先弹窗确认，这里保留后台兜底。
      */
-    public async ensureVoiceModel(onProgress?: (progress: ExportProgress) => void): Promise<boolean> {
-        try {
-          const status = await voiceTranscribeServiceStub.getModelStatus()
-          if (status.success && status.exists) {
-            return true
-          }
+    public async ensureVoiceModel(onProgress?: (progress: ExportProgress) => void): Promise<void> {
+        const status = await voiceTranscribeService.getModelStatus()
+        if (status.success && status.exists && status.valid) return
 
+        onProgress?.({
+          current: 0,
+          total: 100,
+          currentSession: '正在下载语音识别模型',
+          phase: 'preparing',
+          phaseLabel: '正在下载语音识别模型'
+        })
+
+        const downloadResult = await voiceTranscribeService.downloadModel((progress: any) => {
+          if (progress.percent === undefined) return
           onProgress?.({
-            current: 0,
+            current: progress.percent,
             total: 100,
-            currentSession: '正在下载 AI 模型',
-            phase: 'preparing'
+            currentSession: `正在下载语音识别模型 (${progress.percent.toFixed(0)}%)`,
+            phase: 'preparing',
+            phaseLabel: `下载语音模型 ${progress.percent.toFixed(0)}%`
           })
+        })
+        if (!downloadResult.success) {
+          throw new Error(downloadResult.error || '语音识别模型下载失败')
+        }
 
-          const downloadResult = await voiceTranscribeServiceStub.downloadModel((progress: any) => {
-            if (progress.percent !== undefined) {
-              onProgress?.({
-                current: progress.percent,
-                total: 100,
-                currentSession: `正在下载 AI 模型 (${progress.percent.toFixed(0)}%)`,
-                phase: 'preparing'
-              })
-            }
-          })
-
-          return downloadResult.success
-        } catch (e) {
-          console.error('Auto download model failed:', e)
-          return false
+        const verifiedStatus = await voiceTranscribeService.getModelStatus()
+        if (!verifiedStatus.success || !verifiedStatus.exists || !verifiedStatus.valid) {
+          throw new Error(verifiedStatus.error || '语音识别模型文件不完整，请重新下载')
         }
     }
 

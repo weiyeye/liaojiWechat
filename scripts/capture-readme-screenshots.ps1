@@ -145,7 +145,6 @@ try {
     'analytics-global.png' = 'analytics-global.png'
     'analytics-group.png' = 'analytics-group.png'
     'annual-report.png' = 'annual-report.png'
-    'ai.png' = 'ai.png'
     'settings.png' = 'settings.png'
     'popup.png' = 'popup.png'
   }

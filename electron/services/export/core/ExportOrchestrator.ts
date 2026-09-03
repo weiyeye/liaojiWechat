@@ -37,7 +37,7 @@ import { ExcelFormatter } from '../formatters/ExcelFormatter';
 import { HtmlFormatter } from '../formatters/HtmlFormatter';
 import { JsonFormatter } from '../formatters/JsonFormatter';
 import { MarkdownFormatter } from '../formatters/MarkdownFormatter';
-import { SqlFormatter } from '../formatters/SqlFormatter';
+import { PdfFormatter } from '../formatters/PdfFormatter';
 import { TxtFormatter } from '../formatters/TxtFormatter';
 import { WeCloneFormatter } from '../formatters/WeCloneFormatter';
 
@@ -102,10 +102,10 @@ export class ExportOrchestrator {
     }
 
     /**
-     * 导出单个会话为 PostgreSQL SQL 脚本
+     * 导出单个会话为 PDF 文档
      */
-    async exportSessionToSql(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
-        const formatter = new SqlFormatter(this.context);
+    async exportSessionToPdf(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
+        const formatter = new PdfFormatter(this.context);
         return formatter.export(sessionId, outputPath, options, onProgress, control);
     }
 
@@ -390,13 +390,13 @@ export class ExportOrchestrator {
               }
 
               let ext = '.json'
-              if (effectiveOptions.format === 'chatlab-jsonl') ext = '.jsonl'
+              if (effectiveOptions.format === 'pdf') ext = '.pdf'
+              else if (effectiveOptions.format === 'chatlab-jsonl') ext = '.jsonl'
               else if (effectiveOptions.format === 'excel') ext = '.xlsx'
               else if (effectiveOptions.format === 'txt') ext = '.txt'
               else if (effectiveOptions.format === 'markdown') ext = '.md'
               else if (effectiveOptions.format === 'weclone') ext = '.csv'
               else if (effectiveOptions.format === 'html') ext = '.html'
-              else if (effectiveOptions.format === 'sql') ext = '.sql'
               const preferredOutputPath = path.join(sessionDir, `${fileNameWithPrefix}${ext}`)
               const canTrySkipUnchanged = canTrySkipUnchangedTextSessions &&
                 typeof messageCountHint === 'number' &&
@@ -443,7 +443,9 @@ export class ExportOrchestrator {
               claimedOutputPaths.add(outputPath)
 
               let result: { success: boolean; error?: string }
-              if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
+              if (effectiveOptions.format === 'pdf') {
+                result = await this.exportSessionToPdf(sessionId, outputPath, effectiveOptions, sessionProgress, control)
+              } else if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
                 result = await this.exportSessionToDetailedJson(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'chatlab' || effectiveOptions.format === 'chatlab-jsonl') {
                 result = await this.exportSessionToChatLab(sessionId, outputPath, effectiveOptions, sessionProgress, control)
@@ -457,8 +459,6 @@ export class ExportOrchestrator {
                 result = await this.exportSessionToWeCloneCsv(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'html') {
                 result = await this.exportSessionToHtml(sessionId, outputPath, effectiveOptions, sessionProgress, control)
-              } else if (effectiveOptions.format === 'sql') {
-                result = await this.exportSessionToSql(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else {
                 result = { success: false, error: `不支持的格式: ${effectiveOptions.format}` }
               }

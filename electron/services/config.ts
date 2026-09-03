@@ -40,8 +40,12 @@ interface ConfigSchema {
   imageAesKey: string
   wxidConfigs: Record<string, { decryptKey?: string; imageXorKey?: number; imageAesKey?: string; updatedAt?: number }>
   exportPath?: string;
-  /** Weport 导出格式（TXT / JSON） */
-  exportFormat?: 'txt' | 'json';
+  /** Weport 会话导出格式 */
+  exportFormat: 'pdf' | 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
+  /** 一次性把旧版 TXT 默认值迁移为 PDF；用户之后的选择不会再被覆盖。 */
+  exportDefaultFormatPdfMigrated: boolean
+  /** 一次性应用新版导出内容默认组合；用户之后的选择不会再被覆盖。 */
+  exportContentDefaultsV2Migrated: boolean
   // 缓存相关
   cachePath: string
   lastOpenedDb: string
@@ -69,6 +73,13 @@ interface ConfigSchema {
   exportDefaultConcurrency: number
   exportDefaultPathStyle: 'auto' | 'posix' | 'windows'
   exportDefaultDisplayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  exportDefaultDateRange: {
+    version?: 1
+    preset?: 'all' | 'today' | 'yesterday' | 'last3days' | 'last7days' | 'last30days' | 'last1year' | 'last2years' | 'custom' | string
+    useAllTime?: boolean
+    start?: string | number | null
+    end?: string | number | null
+  }
   analyticsExcludedUsernames: string[]
   /** Automatically install anti-revoke triggers for groups discovered after activation. */
   antiRevokeAutoApplyNewGroups: boolean
@@ -252,7 +263,10 @@ export class ConfigService {
       // 开机自启 + 静默启动默认开启（与窗口关闭最小化到托盘一致）：
       // 首次运行即写 Run 键（带 --background），登录后托盘常驻、不弹窗
       silentStartup: true,
-      exportMedia: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
+      exportFormat: 'pdf',
+      exportDefaultFormatPdfMigrated: false,
+      exportContentDefaultsV2Migrated: false,
+      exportMedia: { images: false, videos: false, voices: false, emojis: true, files: false, maxFileSizeMb: 200 },
       exportAvatars: false,
       exportVoiceAsText: false,
       exportConflictStrategy: 'overwrite',
@@ -266,6 +280,8 @@ export class ConfigService {
       exportDefaultConcurrency: 4,
       exportDefaultPathStyle: 'auto',
       exportDefaultDisplayNamePreference: 'remark',
+      // 新增日期筛选不改变旧版行为：首次升级仍默认导出全部聊天记录。
+      exportDefaultDateRange: { version: 1, preset: 'all', useAllTime: true },
       analyticsExcludedUsernames: [],
       antiRevokeAutoApplyNewGroups: false,
       authEnabled: false,

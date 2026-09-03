@@ -641,7 +641,7 @@ export default function WeportAiPanel() {
           <Plus size={14} />
           新建对话
         </button>
-        <div className="ai-chat-list" role="list" aria-label="WeportAI 对话">
+        <div className="ai-chat-list" role="list" aria-label="聊迹 AI 对话">
           {chats.map((c) => (
             <div
               key={c.id}
@@ -730,7 +730,7 @@ export default function WeportAiPanel() {
               <Bug size={14} />
               日志
             </button>
-            <button type="button" className="ai-settings-btn" onClick={() => setSettingsOpen(true)} title="WeportAI 设置">
+            <button type="button" className="ai-settings-btn" onClick={() => setSettingsOpen(true)} title="聊迹 AI 设置">
               <Settings2 size={14} />
               设置
             </button>
@@ -752,7 +752,7 @@ export default function WeportAiPanel() {
               <div className="ai-empty-mark">
                 <Sparkles size={22} strokeWidth={1.6} />
               </div>
-              <h2>WeportAI · 聊天历史分析助手</h2>
+              <h2>聊迹 AI · 聊天历史分析助手</h2>
               <p>
                 基于所选 AI 提供商的本地聊天记录分析环境。它能跨会话查看某一天的完整时间线、搜索任意关键词、统计互动，
                 并把发现持续写入导出目录下的 <code>WeportAI/memory/</code> 长期记忆。
@@ -1143,7 +1143,7 @@ export default function WeportAiPanel() {
           <div className="modal modal-wide ai-debug" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-debug-title">
             <h3 id="ai-debug-title">
               <Bug size={15} />
-              WeportAI 日志
+              聊迹 AI 日志
               <span className="hint">（最近一次任务与 API 请求/响应记录，用于排查问题）</span>
             </h3>
             <div className="ai-debug-toolbar">
@@ -1613,7 +1613,7 @@ function AiSettingsModal({
   }
 
   async function pickWorkspace() {
-    const dir = await api.dialog.openDirectory({ title: '选择 WeportAI 工作区根目录' })
+    const dir = await api.dialog.openDirectory({ title: '选择聊迹 AI 工作区根目录' })
     if (dir) setWorkspaceRoot(dir)
   }
 
@@ -1633,7 +1633,7 @@ function AiSettingsModal({
   return (
     <div className="modal-backdrop" onClick={() => !saving && onClose()}>
       <div className="modal modal-wide ai-settings ai-provider-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
-        <h3 id="ai-settings-title"><Sparkles size={15} /> WeportAI 设置</h3>
+        <h3 id="ai-settings-title"><Sparkles size={15} /> 聊迹 AI 设置</h3>
         <p className="hint">服务配置按 profile 管理。API key 只在本机加密保存，列表、摘要和 discovery 结果都不会返回原始密钥。</p>
         {error && <div className="ai-profile-error">{error}</div>}
 

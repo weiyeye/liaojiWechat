@@ -391,11 +391,13 @@ export class KeyService {
   private async waitForWeChatPid(timeoutMs: number): Promise<number | null> {
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
-      const pids = await this.findWeChatPids()
-      if (pids.length > 0) return pids[0]
+      // 微信 4.x 的 Weixin.exe 是多进程模型，必须优先使用主窗口所属 PID；
+      // 旧版 WeChat.exe 通常是单进程，窗口枚举失败时才允许进程列表回退。
+      const windowPid = await this.waitForWeChatWindow(250)
+      if (windowPid) return windowPid
 
-      const fallbackPid = await this.waitForWeChatWindow(250)
-      if (fallbackPid) return fallbackPid
+      const legacyPids = await this.findPidsByImageName('WeChat.exe')
+      if (legacyPids.length > 0) return legacyPids[0]
 
       await new Promise(r => setTimeout(r, 500))
     }
@@ -508,10 +510,11 @@ export class KeyService {
   }
 
   private async findWeChatPid(): Promise<number | null> {
-    const pids = await this.findWeChatPids()
-    if (pids.length > 0) return pids[0]
-    const fallbackPid = await this.waitForWeChatWindow(5000)
-    return fallbackPid ?? null
+    const windowPid = await this.waitForWeChatWindow(5000)
+    if (windowPid) return windowPid
+
+    const legacyPids = await this.findPidsByImageName('WeChat.exe')
+    return legacyPids[0] ?? null
   }
 
   private async waitForWeChatExit(timeoutMs = 8000): Promise<boolean> {
@@ -565,12 +568,37 @@ export class KeyService {
       if (gracefulOk) return true
     }
 
-    try {
-      await execFileAsync('taskkill', ['/F', '/T', '/IM', 'Weixin.exe'])
-      await execFileAsync('taskkill', ['/F', '/T', '/IM', 'WeChat.exe'])
-    } catch (e) { }
+    // 两个映像分别结束；其中一个不存在时，不能阻断另一个映像的清理。
+    for (const imageName of ['Weixin.exe', 'WeChat.exe']) {
+      try {
+        await execFileAsync('taskkill', ['/F', '/T', '/IM', imageName])
+      } catch { }
+    }
 
     return await this.waitForWeChatExit(5000)
+  }
+
+  private launchWeChat(exePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      try {
+        const child = spawn(exePath, [], {
+          cwd: dirname(exePath),
+          detached: true,
+          stdio: 'ignore',
+        })
+        child.once('spawn', () => {
+          child.unref()
+          resolve(true)
+        })
+        child.once('error', (error) => {
+          console.error('启动微信失败:', error)
+          resolve(false)
+        })
+      } catch (error) {
+        console.error('启动微信失败:', error)
+        resolve(false)
+      }
+    })
   }
 
   // --- Window Detection ---
@@ -795,13 +823,45 @@ export class KeyService {
     if (!this.ensureKernel32()) return { success: false, error: 'Kernel32 Init Failed' }
 
     const logs: string[] = []
+
+    // 先记录运行中微信的真实路径；非默认安装位置在进程关闭后无法再查询。
+    const exePath = await this.findWeChatInstallPath()
+    if (!exePath) {
+      const error = '未找到微信安装路径，未关闭当前微信；请确认微信已正确安装后重试。'
+      onStatus?.(error, 2)
+      return { success: false, error, logs }
+    }
+
+    // 上一次流程若被中断，DLL 共享区可能仍保留旧 Hook 状态。
+    this.cleanupDbKeyHook()
+
+    onStatus?.('正在关闭微信进程...', 0)
+    let processesStopped = false
+    try {
+      processesStopped = await this.killWeChatProcesses()
+    } catch (error) {
+      console.error('关闭微信进程失败:', error)
+    }
+    if (!processesStopped) {
+      const error = '未能完全关闭旧微信进程。请手动退出微信后重试；如果仍然失败，请以管理员身份运行聊迹。'
+      onStatus?.(error, 2)
+      return { success: false, error, logs }
+    }
+
+    onStatus?.('正在启动微信...', 0)
+    if (!await this.launchWeChat(exePath)) {
+      const error = '未能自动启动微信，请手动启动微信后重试。'
+      onStatus?.(error, 2)
+      return { success: false, error, logs }
+    }
+
     const deadline = Date.now() + timeoutMs
-    onStatus?.('正在查找微信进程...', 0)
-    let pid = await this.findWeChatPid()
+    onStatus?.('等待微信启动，请暂不要登录；看到“已准备就绪”后再确认登录...', 0)
+    let pid = await this.waitForNextDbKeyPid(deadline, onStatus)
     if (!pid) {
-      const err = '未找到微信进程，请先启动微信'
+      const err = '未能自动启动微信，或未检测到微信主窗口，请手动启动微信后重试。'
       onStatus?.(err, 2)
-      return { success: false, error: err }
+      return { success: false, error: err, logs }
     }
     let lastAttemptLoginRequiredDetected = false
 

@@ -19,6 +19,7 @@ import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from '
 import { exportCardDiagnosticsService } from './exportCardDiagnosticsService'
 import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
+import { voiceTranscribeService } from './voiceTranscribeService'
 import { LRUCache } from '../utils/LRUCache.js'
 
 export interface ChatSession {
@@ -364,6 +365,7 @@ class ChatService {
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
+  private connectedHostGeneration: number | null = null
   private readonly dbMonitorListeners = new Set<(type: string, json: string) => void>()
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
   private messageCursorHostGeneration: number | null = null
@@ -557,7 +559,7 @@ class ChatService {
    * 连接数据库（并发调用共享同一次连接过程，避免重复 open）
    */
   async connect(): Promise<{ success: boolean; error?: string }> {
-    if (this.connected && wcdbService.isReady()) {
+    if (this.hasCurrentWcdbConnection()) {
       return { success: true }
     }
     if (this.connectInFlight) {
@@ -589,8 +591,15 @@ class ChatService {
         return { success: false, error: '请先在设置页面配置解密密钥' }
       }
 
-      if (this.connected && wcdbService.isReady()) {
+      if (this.hasCurrentWcdbConnection()) {
         return { success: true }
+      }
+
+      // WCDB 超时后会重建宿主进程；旧进程里的数据库句柄随之失效。
+      // generation 变化时必须重新 open，不能只根据 worker 存活状态误判为已连接。
+      if (this.connectedHostGeneration !== wcdbService.getHostGeneration()) {
+        this.connected = false
+        this.monitorSetup = false
       }
 
       // 使用 ConfigService 统一解析账号目录
@@ -607,6 +616,7 @@ class ChatService {
       }
 
       this.connected = true
+      this.connectedHostGeneration = wcdbService.getHostGeneration()
 
       // 设置数据库监控
       this.setupDbMonitor()
@@ -725,10 +735,11 @@ class ChatService {
   }
 
   private async ensureConnected(): Promise<{ success: boolean; error?: string }> {
-    if (this.connected && wcdbService.isReady()) {
+    if (this.hasCurrentWcdbConnection()) {
       return { success: true }
     }
-    if (!wcdbService.isReady()) {
+    if (!wcdbService.isReady() || this.connectedHostGeneration !== wcdbService.getHostGeneration()) {
+      this.connected = false
       this.monitorSetup = false
     }
     const result = await this.connect()
@@ -737,6 +748,12 @@ class ChatService {
       return { success: false, error: result.error }
     }
     return { success: true }
+  }
+
+  private hasCurrentWcdbConnection(): boolean {
+    return this.connected
+      && wcdbService.isReady()
+      && this.connectedHostGeneration === wcdbService.getHostGeneration()
   }
 
   /**
@@ -789,6 +806,7 @@ class ChatService {
       console.error('ChatService: 关闭数据库失败:', e)
     }
     this.connected = false
+    this.connectedHostGeneration = null
     this.monitorSetup = false
     if (this.monitorRetryTimer) {
       clearTimeout(this.monitorRetryTimer)
@@ -8120,7 +8138,7 @@ class ChatService {
     }
     // 回退到默认目录
     const documentsPath = app.getPath('documents')
-    return join(documentsPath, 'WeFlow', 'Voices')
+    return join(documentsPath, 'Weport', 'Voices')
   }
 
   private getEmojiCacheDir(): string {
@@ -8130,7 +8148,7 @@ class ChatService {
     }
     // 回退到默认目录
     const documentsPath = app.getPath('documents')
-    return join(documentsPath, 'WeFlow', 'Emojis')
+    return join(documentsPath, 'Weport', 'Emojis')
   }
 
   clearCaches(options?: { includeMessages?: boolean; includeContacts?: boolean; includeEmojis?: boolean }): { success: boolean; error?: string } {
@@ -8870,23 +8888,39 @@ class ChatService {
   /**
    * 获取图片数据（解密后的）
    */
-  async getImageData(sessionId: string, msgId: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getImageData(
+    sessionId: string,
+    msgId: string,
+    hint?: { imageMd5?: string; imageDatName?: string; createTime?: number; rawContent?: string }
+  ): Promise<{ success: boolean; data?: string; error?: string }> {
     try {
       const localId = parseInt(msgId, 10)
       if (!this.connected) await this.connect()
 
-      // 1. 获取消息详情
-      const msgResult = await this.getMessageByLocalId(sessionId, localId)
-      if (!msgResult.success || !msgResult.message) {
-        return { success: false, error: '未找到消息' }
-      }
-      const msg = msgResult.message
-      const rawImageInfo = msg.rawContent ? this.parseImageInfo(msg.rawContent) : {}
-      const imageMd5 = msg.imageMd5 || rawImageInfo.md5
-      const imageDatName = msg.imageDatName
+      // 优先使用消息列表已携带的强标识。localId 在分片消息表之间可能重复，
+      // 仅凭 localId 反查会偶尔命中另一条消息，导致明明有图片却提示缺少 md5。
+      let imageMd5 = String(hint?.imageMd5 || '').trim() || undefined
+      let imageDatName = String(hint?.imageDatName || '').trim() || undefined
+      let createTime = Number(hint?.createTime || 0) || undefined
+      let rawContent = String(hint?.rawContent || '')
 
       if (!imageMd5 && !imageDatName) {
-        return { success: false, error: '图片缺少 md5/datName，无法定位原文件' }
+        const msgResult = await this.getMessageByLocalId(sessionId, localId)
+        if (!msgResult.success || !msgResult.message) {
+          return { success: false, error: '未找到消息' }
+        }
+        const msg = msgResult.message
+        imageMd5 = msg.imageMd5 || undefined
+        imageDatName = msg.imageDatName || undefined
+        createTime = msg.createTime || createTime
+        rawContent = msg.rawContent || rawContent
+      }
+
+      const rawImageInfo = rawContent ? this.parseImageInfo(rawContent) : {}
+      imageMd5 = imageMd5 || rawImageInfo.md5
+
+      if (!imageMd5 && !imageDatName) {
+        return { success: false, error: '图片文件未找到' }
       }
 
       // 2. 使用 imageDecryptService 解密图片（仅使用真实图片标识）
@@ -8894,7 +8928,7 @@ class ChatService {
         sessionId,
         imageMd5,
         imageDatName,
-        createTime: msg.createTime,
+        createTime,
         force: false,
         preferFilePath: true,
         hardlinkOnly: true
@@ -8948,6 +8982,12 @@ class ChatService {
     try {
       lookupPath.push(`会话=${sessionId}, 消息=${msgId}, 传入createTime=${msgCreateTimeLabel(createTime)}, serverId=${String(serverId || 0)}`)
       lookupPath.push(`消息来源提示=${senderWxidOpt || '无'}`)
+
+      const connection = await this.ensureConnected()
+      if (!connection.success) {
+        logLookupPath('fail', connection.error || '数据库未连接')
+        return { success: false, error: connection.error || '数据库未连接' }
+      }
 
       const localId = parseInt(msgId, 10)
       if (isNaN(localId)) {
@@ -9096,6 +9136,13 @@ class ChatService {
 
       if (!silkData) {
         lookupPath.push('native未找到语音数据，尝试media.db直查fallback')
+        // native 查询超时会重建 WCDB 宿主；fallback 前重新确认句柄，
+        // 否则新宿主虽已启动，却仍处于尚未 open 的状态。
+        const fallbackConnection = await this.ensureConnected()
+        if (!fallbackConnection.success) {
+          logLookupPath('fail', fallbackConnection.error || '语音数据服务恢复失败')
+          return { success: false, error: fallbackConnection.error || '语音数据服务恢复失败' }
+        }
         const fallbackStart = Date.now()
         silkData = await this.getVoiceDataFromMediaDbFallback(sessionId, msgCreateTime, localId, resolvedServerId || 0, candidates, lookupPath)
         lookupPath.push(`fallback定位耗时=${Date.now() - fallbackStart}ms`)
@@ -9798,9 +9845,8 @@ class ChatService {
 
 
       // 检查转写缓存
-      const cached = this.voiceTranscriptCache.get(cacheKey)
-      if (cached) {
-
+      if (this.voiceTranscriptCache.has(cacheKey)) {
+        const cached = this.voiceTranscriptCache.get(cacheKey) || ''
         return { success: true, transcript: cached }
       }
 
@@ -9849,10 +9895,14 @@ class ChatService {
 
           }
 
-          // 转写
-
-          // 语音转写服务已裁剪（Weport 不提供转写功能）
-          return { success: false, error: '语音转写暂不可用（已裁剪）' }
+          // 与参考项目一致：WAV 解码完成后交给本地 SenseVoice Worker，结果仅落本地缓存。
+          const result = await voiceTranscribeService.transcribeWavBuffer(wavData, onPartial)
+          if (result.success) {
+            const transcript = typeof result.transcript === 'string' ? result.transcript : ''
+            this.cacheVoiceTranscript(cacheKey, transcript)
+            console.info(`[Transcribe] 转写完成: sessionId=${sessionId}, msgId=${msgId}, chars=${transcript.length}, duration=${Date.now() - startTime}ms`)
+          }
+          return result
         } catch (error) {
           console.error(`[Transcribe] 异常:`, error)
           return { success: false, error: String(error) }
@@ -9887,7 +9937,7 @@ class ChatService {
   /** 获取持久化转写缓存文件路径 */
   private getTranscriptCachePath(): string {
     const cachePath = this.configService.get('cachePath')
-    const base = cachePath || join(app.getPath('documents'), 'WeFlow')
+    const base = cachePath || join(app.getPath('documents'), 'Weport')
     return join(base, 'Voices', 'transcripts.json')
   }
 
@@ -10018,6 +10068,34 @@ class ChatService {
   }
 
   /**
+   * 预解码一个会话中的全部语音。聊天页只传会话 ID，避免把大量消息对象
+   * 往返发送到渲染进程；解码结果沿用现有 WAV 磁盘缓存。
+   */
+  async preloadSessionVoices(
+    sessionId: string
+  ): Promise<{ success: boolean; total?: number; prepared?: number; error?: string }> {
+    const result = await this.getAllVoiceMessages(sessionId)
+    if (!result.success || !result.messages) {
+      return { success: false, error: result.error || '查询语音消息失败' }
+    }
+
+    const messages = result.messages
+    const prepared = await this.preloadVoiceDataBatch(
+      sessionId,
+      messages.map(message => ({
+        localId: message.localId,
+        createTime: message.createTime,
+        serverId: message.serverIdRaw || message.serverId,
+        senderWxid: message.senderUsername
+      }))
+    )
+    if (!prepared.success) {
+      return { success: false, total: messages.length, error: prepared.error || '语音预解码失败' }
+    }
+    return { success: true, total: messages.length, prepared: prepared.prepared || 0 }
+  }
+
+  /**
    * 获取某会话中有消息的日期列表
    * 返回 YYYY-MM-DD 格式的日期字符串数组
    */
@@ -10063,6 +10141,48 @@ class ChatService {
     } catch (e) {
       console.error('[ChatService] 获取全部图片消息失败:', e)
       return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 预解密一个会话中的全部图片。这里只生成/复用本地缓存，不修改微信数据库；
+   * 并发数保持较低，避免聊天页操作占满磁盘。
+   */
+  async preloadSessionImages(
+    sessionId: string
+  ): Promise<{ success: boolean; total?: number; prepared?: number; failed?: number; error?: string }> {
+    const result = await this.getAllImageMessages(sessionId)
+    if (!result.success || !result.images) {
+      return { success: false, error: result.error || '查询图片消息失败' }
+    }
+
+    let prepared = 0
+    let failed = 0
+    await this.forEachWithConcurrency(result.images, 3, async image => {
+      try {
+        const decrypted = await this.imageDecryptService.decryptImage({
+          sessionId,
+          imageMd5: image.imageMd5,
+          imageDatName: image.imageDatName,
+          createTime: image.createTime,
+          force: false,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          disableUpdateCheck: true,
+          suppressEvents: true
+        })
+        if (decrypted.success) prepared += 1
+        else failed += 1
+      } catch {
+        failed += 1
+      }
+    })
+
+    return {
+      success: true,
+      total: result.images.length,
+      prepared,
+      failed
     }
   }
 

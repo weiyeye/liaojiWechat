@@ -44,10 +44,6 @@ export class HtmlFormatter {
         phase: 'preparing'
       })
 
-      if (options.exportVoiceAsText) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const collectParams = this.exportService.resolveCollectParams(options)
       const collectProgressReporter = this.exportService.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
       const collected: any = await this.exportService.collectMessages(
@@ -182,8 +178,13 @@ export class HtmlFormatter {
         : []
       const voiceTranscriptMap = new Map<string, string>()
 
+      const voiceMessagesNeedingTranscript = this.exportService.getVoiceMessagesNeedingTranscript(sessionId, voiceMessages)
+      if (voiceMessagesNeedingTranscript.length > 0) {
+        await this.exportService.ensureVoiceModel(onProgress)
+      }
+
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessagesNeedingTranscript, control)
 
         onProgress?.({
           current: 40,

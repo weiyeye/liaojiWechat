@@ -1,195 +1,225 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { chatService } from './chatService'
+import { chatService, type ContactInfo } from './chatService'
 
-interface ContactExportOptions {
-    format: 'json' | 'csv' | 'vcf'
-    exportAvatars: boolean
-    contactTypes: {
-        friends: boolean
-        groups: boolean
-        officials: boolean
-        blocked?: boolean
-    }
-    selectedUsernames?: string[]
+export type ContactExportFormat = 'json' | 'csv' | 'vcf'
+
+export interface ContactExportFields {
+  displayName: boolean
+  remark: boolean
+  nickname: boolean
+  alias: boolean
+  labels: boolean
+  description: boolean
+  detailDescription: boolean
+  region: boolean
 }
 
-/**
- * 联系人导出服务
- */
+export interface ContactExportOptions {
+  format: ContactExportFormat
+  exportAvatars?: boolean
+  fields?: Partial<ContactExportFields>
+  contactTypes?: {
+    friends?: boolean
+    groups?: boolean
+    officials?: boolean
+    formerFriends?: boolean
+    blocked?: boolean
+    other?: boolean
+  }
+  selectedUsernames?: string[]
+}
+
+export interface ContactExportResult {
+  success: boolean
+  successCount?: number
+  outputPath?: string
+  outputDirectory?: string
+  error?: string
+}
+
+const DEFAULT_FIELDS: ContactExportFields = {
+  displayName: true,
+  remark: true,
+  nickname: true,
+  alias: true,
+  labels: true,
+  description: true,
+  detailDescription: true,
+  region: true,
+}
+
+/** 联系人导出服务。 */
 class ContactExportService {
-    /**
-     * 导出联系人
-     */
-    async exportContacts(
-        outputDir: string,
-        options: ContactExportOptions
-    ): Promise<{ success: boolean; successCount?: number; error?: string }> {
-        try {
-            // 获取所有联系人
-            const contactsResult = await chatService.getContacts()
-            if (!contactsResult.success || !contactsResult.contacts) {
-                return { success: false, error: contactsResult.error || '获取联系人失败' }
-            }
+  async exportContacts(outputDir: string, options: ContactExportOptions): Promise<ContactExportResult> {
+    try {
+      const contactsResult = await chatService.getContacts()
+      if (!contactsResult.success || !contactsResult.contacts) {
+        return { success: false, error: contactsResult.error || '获取联系人失败' }
+      }
 
-            let contacts = contactsResult.contacts
+      const selectedUsernames = Array.isArray(options.selectedUsernames)
+        ? new Set(options.selectedUsernames.filter(Boolean))
+        : null
+      const contactTypes = {
+        friends: options.contactTypes?.friends ?? true,
+        groups: options.contactTypes?.groups ?? true,
+        officials: options.contactTypes?.officials ?? true,
+        formerFriends: options.contactTypes?.formerFriends ?? true,
+        blocked: options.contactTypes?.blocked ?? true,
+        other: options.contactTypes?.other ?? true,
+      }
 
-            // 根据类型过滤
-            contacts = contacts.filter(c => {
-                if (c.type === 'friend' && !options.contactTypes.friends) return false
-                if (c.type === 'group' && !options.contactTypes.groups) return false
-                if (c.type === 'official' && !options.contactTypes.officials) return false
-                if (c.type === 'blocked' && !options.contactTypes.blocked) return false
-                return true
-            })
-
-            if (Array.isArray(options.selectedUsernames) && options.selectedUsernames.length > 0) {
-                const selectedSet = new Set(options.selectedUsernames)
-                contacts = contacts.filter(c => selectedSet.has(c.username))
-            }
-
-            if (contacts.length === 0) {
-                return { success: false, error: '没有符合条件的联系人' }
-            }
-
-            // 确保输出目录存在
-            if (!fs.existsSync(outputDir)) {
-                fs.mkdirSync(outputDir, { recursive: true })
-            }
-
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
-            let outputPath: string
-
-            switch (options.format) {
-                case 'json':
-                    outputPath = path.join(outputDir, `contacts_${timestamp}.json`)
-                    await this.exportToJSON(contacts, outputPath)
-                    break
-                case 'csv':
-                    outputPath = path.join(outputDir, `contacts_${timestamp}.csv`)
-                    await this.exportToCSV(contacts, outputPath)
-                    break
-                case 'vcf':
-                    outputPath = path.join(outputDir, `contacts_${timestamp}.vcf`)
-                    await this.exportToVCF(contacts, outputPath)
-                    break
-                default:
-                    return { success: false, error: '不支持的导出格式' }
-            }
-
-            return { success: true, successCount: contacts.length }
-        } catch (e) {
-            return { success: false, error: String(e) }
+      let contacts = contactsResult.contacts.filter((contact) => {
+        if (selectedUsernames && !selectedUsernames.has(contact.username)) return false
+        switch (contact.type) {
+          case 'friend': return contactTypes.friends
+          case 'group': return contactTypes.groups
+          case 'official': return contactTypes.officials
+          case 'former_friend': return contactTypes.formerFriends
+          case 'blocked': return contactTypes.blocked
+          default: return contactTypes.other
         }
-    }
+      })
 
-    /**
-     * 导出为JSON格式
-     */
-    private async exportToJSON(contacts: any[], outputPath: string): Promise<void> {
-        const data = {
-            exportedAt: new Date().toISOString(),
-            count: contacts.length,
-            contacts: contacts.map(c => ({
-                username: c.username,
-                displayName: c.displayName,
-                remark: c.remark,
-                nickname: c.nickname,
-                alias: c.alias,
-                labels: Array.isArray(c.labels) ? c.labels : [],
-                description: c.description,
-                signature: c.detailDescription,
-                detailDescription: c.detailDescription,
-                region: c.region,
-                type: c.type,
-                officialAccountKind: c.officialAccountKind,
-                officialAccountType: c.officialAccountType,
-                typeLabel: this.getTypeLabel(c)
-            }))
+      // vCard 面向个人通讯录；群聊与公众号没有可靠的 vCard 语义。
+      if (options.format === 'vcf') {
+        contacts = contacts.filter((contact) => contact.type === 'friend')
+      }
+
+      if (contacts.length === 0) {
+        return {
+          success: false,
+          error: options.format === 'vcf' ? '所选联系人中没有可导出的好友' : '没有选择联系人',
         }
-        fs.writeFileSync(outputPath, JSON.stringify(data, null, 2), 'utf-8')
+      }
+
+      const normalizedOutputDir = path.resolve(outputDir)
+      fs.mkdirSync(normalizedOutputDir, { recursive: true })
+
+      const fields = { ...DEFAULT_FIELDS, ...(options.fields || {}) }
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
+      const outputPath = path.join(normalizedOutputDir, `contacts_${timestamp}.${options.format}`)
+
+      switch (options.format) {
+        case 'json':
+          this.exportToJSON(contacts, outputPath, fields)
+          break
+        case 'csv':
+          this.exportToCSV(contacts, outputPath, fields)
+          break
+        case 'vcf':
+          this.exportToVCF(contacts, outputPath, fields)
+          break
+        default:
+          return { success: false, error: '不支持的导出格式' }
+      }
+
+      return {
+        success: true,
+        successCount: contacts.length,
+        outputPath,
+        outputDirectory: normalizedOutputDir,
+      }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
 
-    /**
-     * 导出为CSV格式
-     */
-    private async exportToCSV(contacts: any[], outputPath: string): Promise<void> {
-        const headers = ['用户名', '显示名称', '备注', '昵称', '微信号', '标签', '描述', '个性签名', '地区', '类型']
-        const rows = contacts.map(c => [
-            c.username || '',
-            c.displayName || '',
-            c.remark || '',
-            c.nickname || '',
-            c.alias || '',
-            Array.isArray(c.labels) ? c.labels.join(' | ') : '',
-            c.description || '',
-            c.detailDescription || '',
-            c.region || '',
-            this.getTypeLabel(c)
-        ])
-        const escapeCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
-
-        const csvContent = [
-            headers.join(','),
-            ...rows.map(row => row.map(escapeCell).join(','))
-        ].join('\n')
-
-        fs.writeFileSync(outputPath, '\uFEFF' + csvContent, 'utf-8') // 添加BOM以支持Excel
-    }
-
-    /**
-     * 导出为VCF格式（vCard）
-     */
-    private async exportToVCF(contacts: any[], outputPath: string): Promise<void> {
-        const vcards = contacts
-            .filter(c => c.type === 'friend') // VCF通常只用于个人联系人
-            .map(c => {
-                const lines = ['BEGIN:VCARD', 'VERSION:3.0']
-
-                // 全名
-                lines.push(`FN:${c.displayName || c.username}`)
-
-                // 昵称
-                if (c.nickname) {
-                    lines.push(`NICKNAME:${c.nickname}`)
-                }
-
-                const noteParts = [
-                    c.remark ? String(c.remark) : '',
-                    Array.isArray(c.labels) && c.labels.length > 0 ? `标签: ${c.labels.join(', ')}` : '',
-                    c.description ? `描述: ${c.description}` : '',
-                    c.detailDescription ? `个性签名: ${c.detailDescription}` : '',
-                    c.region ? `地区: ${c.region}` : ''
-                ].filter(Boolean)
-                if (noteParts.length > 0) {
-                    lines.push(`NOTE:${noteParts.join('\\n')}`)
-                }
-
-                // 微信ID
-                lines.push(`X-WECHAT-ID:${c.username}`)
-
-                lines.push('END:VCARD')
-                return lines.join('\r\n')
-            })
-
-        fs.writeFileSync(outputPath, vcards.join('\r\n\r\n'), 'utf-8')
-    }
-
-    private getTypeLabel(contactOrType: any): string {
-        const type = typeof contactOrType === 'string' ? contactOrType : String(contactOrType?.type || '')
-        if (type === 'official' && typeof contactOrType !== 'string') {
-            if (contactOrType.officialAccountKind === 'service') return '服务号'
-            if (contactOrType.officialAccountKind === 'enterprise') return '企业号'
-            return '公众号'
+  private exportToJSON(contacts: ContactInfo[], outputPath: string, fields: ContactExportFields): void {
+    const data = {
+      exportedAt: new Date().toISOString(),
+      count: contacts.length,
+      contacts: contacts.map((contact) => {
+        const item: Record<string, unknown> = {
+          username: contact.username,
+          type: contact.type,
+          typeLabel: this.getTypeLabel(contact),
         }
-        switch (type) {
-            case 'friend': return '好友'
-            case 'group': return '群聊'
-            case 'official': return '公众号'
-            case 'blocked': return '黑名单'
-            default: return '其他'
+        if (fields.displayName) item.displayName = contact.displayName
+        if (fields.remark) item.remark = contact.remark
+        if (fields.nickname) item.nickname = contact.nickname
+        if (fields.alias) item.alias = contact.alias
+        if (fields.labels) item.labels = Array.isArray(contact.labels) ? contact.labels : []
+        if (fields.description) item.description = contact.description
+        if (fields.detailDescription) item.detailDescription = contact.detailDescription
+        if (fields.region) item.region = contact.region
+        if (contact.type === 'official') {
+          item.officialAccountKind = contact.officialAccountKind
+          item.officialAccountType = contact.officialAccountType
         }
+        return item
+      }),
     }
+    fs.writeFileSync(outputPath, JSON.stringify(data, null, 2), 'utf-8')
+  }
+
+  private exportToCSV(contacts: ContactInfo[], outputPath: string, fields: ContactExportFields): void {
+    const columns: Array<{ header: string; value: (contact: ContactInfo) => unknown }> = [
+      { header: '用户名', value: (contact) => contact.username },
+    ]
+    if (fields.displayName) columns.push({ header: '显示名称', value: (contact) => contact.displayName })
+    if (fields.remark) columns.push({ header: '备注', value: (contact) => contact.remark })
+    if (fields.nickname) columns.push({ header: '昵称', value: (contact) => contact.nickname })
+    if (fields.alias) columns.push({ header: '微信号', value: (contact) => contact.alias })
+    if (fields.labels) columns.push({ header: '标签', value: (contact) => contact.labels?.join(' | ') || '' })
+    if (fields.description) columns.push({ header: '描述', value: (contact) => contact.description })
+    if (fields.detailDescription) columns.push({ header: '个性签名', value: (contact) => contact.detailDescription })
+    if (fields.region) columns.push({ header: '地区', value: (contact) => contact.region })
+    columns.push({ header: '类型', value: (contact) => this.getTypeLabel(contact) })
+
+    const escapeCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
+    const csvContent = [
+      columns.map((column) => column.header).join(','),
+      ...contacts.map((contact) => columns.map((column) => escapeCell(column.value(contact))).join(',')),
+    ].join('\n')
+
+    fs.writeFileSync(outputPath, `\uFEFF${csvContent}`, 'utf-8')
+  }
+
+  private exportToVCF(contacts: ContactInfo[], outputPath: string, fields: ContactExportFields): void {
+    const escapeValue = (value: unknown) => String(value ?? '')
+      .replace(/\\/g, '\\\\')
+      .replace(/\r?\n/g, '\\n')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+
+    const vcards = contacts.map((contact) => {
+      const lines = ['BEGIN:VCARD', 'VERSION:3.0']
+      const fullName = fields.displayName ? contact.displayName : contact.username
+      lines.push(`FN:${escapeValue(fullName || contact.username)}`)
+      if (fields.nickname && contact.nickname) lines.push(`NICKNAME:${escapeValue(contact.nickname)}`)
+
+      const noteParts: string[] = []
+      if (fields.remark && contact.remark) noteParts.push(`备注: ${contact.remark}`)
+      if (fields.alias && contact.alias) noteParts.push(`微信号: ${contact.alias}`)
+      if (fields.labels && contact.labels?.length) noteParts.push(`标签: ${contact.labels.join(', ')}`)
+      if (fields.description && contact.description) noteParts.push(`描述: ${contact.description}`)
+      if (fields.detailDescription && contact.detailDescription) noteParts.push(`个性签名: ${contact.detailDescription}`)
+      if (fields.region && contact.region) noteParts.push(`地区: ${contact.region}`)
+      if (noteParts.length > 0) lines.push(`NOTE:${escapeValue(noteParts.join('\n'))}`)
+
+      lines.push(`X-WECHAT-ID:${escapeValue(contact.username)}`, 'END:VCARD')
+      return lines.join('\r\n')
+    })
+
+    fs.writeFileSync(outputPath, vcards.join('\r\n\r\n'), 'utf-8')
+  }
+
+  private getTypeLabel(contact: ContactInfo): string {
+    if (contact.type === 'official') {
+      if (contact.officialAccountKind === 'service') return '服务号'
+      if (contact.officialAccountKind === 'enterprise') return '企业号'
+      return '公众号'
+    }
+    switch (contact.type) {
+      case 'friend': return '好友'
+      case 'group': return '群聊'
+      case 'former_friend': return '已删除好友'
+      case 'blocked': return '黑名单'
+      default: return '其他'
+    }
+  }
 }
 
 export const contactExportService = new ContactExportService()

@@ -72,7 +72,8 @@ export class ChatLabFormatter {
         ? allMessages.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
+      const voiceMessagesNeedingTranscript = this.exportService.getVoiceMessagesNeedingTranscript(sessionId, voiceMessages)
+      if (voiceMessagesNeedingTranscript.length > 0) {
         await this.exportService.ensureVoiceModel(onProgress)
       }
 
@@ -194,7 +195,7 @@ export class ChatLabFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessagesNeedingTranscript, control)
 
         onProgress?.({
           current: 40,

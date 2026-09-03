@@ -75,6 +75,7 @@ export default defineConfig(({ mode }) => ({
                 'koffi',
                 'fsevents',
                 'exceljs',
+                'pdfkit',
                 '@vscode/sudo-prompt',
                 'silk-wasm',
                 // 原生 .node 二进制不可打包，运行时从 asarUnpack 目录解析
@@ -118,6 +119,22 @@ export default defineConfig(({ mode }) => ({
             rollupOptions: {
               output: {
                 entryFileNames: 'imageDecryptWorker.js',
+                codeSplitting: false
+              }
+            }
+          }
+        }
+      },
+      {
+        entry: 'electron/transcribeWorker.ts',
+        onstart: handleElectronOnStart,
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['sherpa-onnx-node'],
+              output: {
+                entryFileNames: 'transcribeWorker.js',
                 codeSplitting: false
               }
             }

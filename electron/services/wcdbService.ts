@@ -9,6 +9,11 @@ interface WorkerMessage {
   error?: string
 }
 
+const getVoiceLookupTimeoutMs = (): number => {
+  const configured = Number(process.env.WEPORT_VOICE_LOOKUP_TIMEOUT_MS || 12_000)
+  return Number.isFinite(configured) ? Math.max(3_000, Math.min(60_000, configured)) : 12_000
+}
+
 /**
  * WCDB 服务 (客户端代理)
  * 负责与后台 WCDB 宿主进程（WeFlow.exe 硬链接，见 wcdbHostClient.ts）通信，
@@ -647,13 +652,21 @@ export class WcdbService {
    * 获取语音数据
    */
   async getVoiceData(sessionId: string, createTime: number, candidates: string[], localId: number = 0, svrId: string | number = 0): Promise<{ success: boolean; hex?: string; error?: string }> {
-    return this.callWorker('getVoiceData', { sessionId, createTime, candidates, localId, svrId })
+    // 底层 native 查询在个别未缓存语音上可能永久阻塞。语音属于交互操作，
+    // 不应沿用通用 WCDB 的 180 秒上限；超时后宿主会重建并由上层走直查兜底。
+    return this.callWorker('getVoiceData', { sessionId, createTime, candidates, localId, svrId }, {
+      timeoutMs: getVoiceLookupTimeoutMs()
+    })
   }
 
   async getVoiceDataBatch(
     requests: Array<{ session_id: string; create_time: number; local_id?: number; svr_id?: string | number; candidates?: string[] }>
   ): Promise<{ success: boolean; rows?: Array<{ index: number; hex?: string }>; error?: string }> {
-    return this.callWorker('getVoiceDataBatch', { requests })
+    const requestCount = Math.max(1, Array.isArray(requests) ? requests.length : 1)
+    const timeoutMs = requestCount === 1
+      ? getVoiceLookupTimeoutMs()
+      : Math.min(120_000, Math.max(getVoiceLookupTimeoutMs(), requestCount * 2_500))
+    return this.callWorker('getVoiceDataBatch', { requests }, { timeoutMs })
   }
 
   async getMediaSchemaSummary(dbPath: string): Promise<{ success: boolean; data?: any; error?: string }> {

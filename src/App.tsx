@@ -40,22 +40,42 @@ import {
   Sparkles,
   Images,
   LineChart,
-  Palette,
-  Contrast,
   MapPin,
   Timer,
+  CalendarRange,
   Settings2 as SettingsIcon,
+  ContactRound,
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
+import { SessionIdentity } from './components/SessionIdentity'
+import { VoiceTranscribeDialog } from './components/VoiceTranscribeDialog'
 import SnsPage from './pages/SnsPage'
+import ChatPage from './pages/ChatPage'
+import ContactsPage from './pages/ContactsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
-import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
+import { initColorMode } from './utils/colorMode'
+import {
+  EXPORT_DATE_RANGE_PRESETS,
+  createDefaultExportDateRangeSelection,
+  createExportDateRangeSelectionFromPreset,
+  formatDateValue,
+  getExportDateRangeLabel,
+  parseDateValue,
+  resolveExportDateRangeConfig,
+  serializeExportDateRangeConfig,
+  startOfDay,
+  endOfDay,
+  toExportTimestampRange,
+  type ExportDateRangePreset,
+  type ExportDateRangeSelection,
+} from './utils/exportDateRange'
+import { hydrateSessionIdentities, type SessionIdentityItem } from './utils/sessionIdentity'
 import './styles/v09.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
-type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
+type Tab = 'connect' | 'chat' | 'contacts' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
+type Format = 'pdf' | 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
 type DisplayNamePref = 'group-nickname' | 'remark' | 'nickname'
@@ -80,17 +100,15 @@ type ExportLogInfo = {
   exists: boolean
 }
 
-type AntiRevokeSession = {
-  username: string
-  displayName?: string
+type AntiRevokeSession = SessionIdentityItem & {
   type?: number
-  avatarUrl?: string
 }
 
 const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
 
 const FORMATS: Array<{ value: Format; label: string; desc: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
+  { value: 'pdf', label: 'PDF', desc: '文档归档与分享', icon: FileText },
   { value: 'txt', label: 'TXT', desc: '纯文本', icon: FileText },
   { value: 'json', label: 'JSON', desc: '完整消息详情', icon: Braces },
   { value: 'html', label: 'HTML', desc: '网页浏览', icon: Code2 },
@@ -100,17 +118,16 @@ const FORMATS: Array<{ value: Format; label: string; desc: string; icon: React.C
   { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式 · 适合大量消息', icon: Rows3 },
   { value: 'arkme-json', label: 'Arkme JSON', desc: '紧凑 JSON', icon: Boxes },
   { value: 'weclone', label: 'WeClone CSV', desc: 'CSV 兼容', icon: FileSpreadsheet },
-  { value: 'sql', label: 'PostgreSQL', desc: '数据库脚本', icon: Database },
 ]
 
 const FORMAT_FOLDERS: Record<Format, string> = {
+  pdf: 'PDF',
   txt: 'TXT',
   json: 'JSON',
   'arkme-json': 'ARKME-JSON',
   html: 'HTML',
   markdown: 'MARKDOWN',
   excel: 'XLSX',
-  sql: 'SQL',
   chatlab: 'CHATLAB',
   'chatlab-jsonl': 'CHATLAB-JSONL',
   weclone: 'WECLONE',
@@ -174,10 +191,14 @@ const NOTIFICATION_POSITION_OPTIONS: Array<{ value: NotificationPosition; label:
 
 const isValidDecryptKey = (value: string): boolean => /^[0-9a-f]{64}$/i.test(value.trim())
 
+const isVoiceModelReady = (status: { success?: boolean; exists?: boolean; valid?: boolean } | null | undefined): boolean => (
+  status?.success === true && status.exists === true && status.valid === true
+)
+
 const EXPORT_DEFAULTS = {
-  format: 'txt' as Format,
+  format: 'pdf' as Format,
   writeLayout: 'A' as WriteLayout,
-  media: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
+  media: { images: false, videos: false, voices: false, emojis: true, files: false, maxFileSizeMb: 200 },
   avatars: false,
   voiceAsText: false,
   pathStyle: 'auto' as PathStyle,
@@ -188,21 +209,29 @@ const EXPORT_DEFAULTS = {
 
 const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap },
+  { id: 'chat', label: '聊天', icon: MessageSquareText },
+  { id: 'contacts', label: '联系人', icon: ContactRound },
   { id: 'export', label: '导出数据', icon: Download },
   { id: 'sns', label: '朋友圈', icon: Images },
   { id: 'analytics', label: '分析', icon: LineChart },
-  { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
   { id: 'notifications', label: '消息通知', icon: Bell },
-  { id: 'ai', label: 'WeportAI', icon: Sparkles },
   { id: 'settings', label: '设置', icon: SettingsIcon },
 ]
+
+// 一级功能按工作流分组；只调整导航信息架构，不改变原有页签与切换逻辑。
+const NAV_GROUPS: Array<{ label: string; ids: Tab[] }> = [
+  { label: '工作', ids: ['chat', 'contacts', 'export'] },
+  { label: '洞察', ids: ['sns', 'analytics'] },
+  { label: '服务', ids: ['notifications'] },
+]
+
+const NAV_FOOTER_IDS: Tab[] = ['connect', 'settings']
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
 
 function MarkIcon() {
-  // 顶栏品牌图标：真实应用图标（唯一来源 assets/branding/weport-icon.jpg
-  // → assets/icons/icon.png → public/icon.png）
-  return <img className="mark-img" src="icon.png" alt="Weport" draggable={false} />
+  // 界面品牌位与主窗口、托盘、通知窗和安装包共用同一图标母版。
+  return <img className="mark-img" src="/icon.png" alt="聊迹" draggable={false} />
 }
 
 export default function App() {
@@ -210,18 +239,19 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('connect')
   const [dbPath, setDbPath] = useState('')
   const [exportPath, setExportPath] = useState('')
-  const [format, setFormat] = useState<Format>('txt')
+  const [format, setFormat] = useState<Format>('pdf')
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [keyStatus, setKeyStatus] = useState('')
   const [keyHookReady, setKeyHookReady] = useState(false)
+  const [keyExtractConfirmOpen, setKeyExtractConfirmOpen] = useState(false)
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
   const [busy, setBusy] = useState(false)
-  const [busyLabel, setBusyLabel] = useState('')
+  const [, setBusyLabel] = useState('')
   const [progress, setProgress] = useState<any | null>(null)
   const [exportTaskId, setExportTaskId] = useState<string | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
@@ -252,21 +282,23 @@ export default function App() {
   const [antiRevokeNewGroupsEnabled, setAntiRevokeNewGroupsEnabled] = useState(false)
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
-  const colorMode = useColorMode()
-
   useEffect(() => {
     void initColorMode()
   }, [])
 
   // 导出选项（WeFlow 对齐）
-  const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 })
+  const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: true, files: false, maxFileSizeMb: 200 })
   const [exportAvatars, setExportAvatars] = useState(false)
   const [exportVoiceAsText, setExportVoiceAsText] = useState(false)
+  const [checkingVoiceModel, setCheckingVoiceModel] = useState(false)
+  const [voiceModelDialogOpen, setVoiceModelDialogOpen] = useState(false)
+  const resumeExportAfterVoiceModelRef = useRef(false)
   const [exportPathStyle, setExportPathStyle] = useState<PathStyle>('auto')
   const [exportConflict, setExportConflict] = useState<ConflictStrategy>('overwrite')
   const [displayNamePref, setDisplayNamePref] = useState<DisplayNamePref>('group-nickname')
   const [exportConcurrency, setExportConcurrency] = useState(3)
   const [writeLayout, setWriteLayout] = useState<WriteLayout>('A')
+  const [exportDateRange, setExportDateRange] = useState<ExportDateRangeSelection>(() => createDefaultExportDateRangeSelection())
   const [showAdvanced, setShowAdvanced] = useState(true)
   const [exportSessions, setExportSessions] = useState<ExportSessionPickerItem[]>([])
   const [selectedExportSessionIds, setSelectedExportSessionIds] = useState<Set<string>>(new Set())
@@ -280,13 +312,14 @@ export default function App() {
   const [notifyFilterOpen, setNotifyFilterOpen] = useState(false)
   const [notifyFilterMode, setNotifyFilterMode] = useState<FilterMode>('all')
   const [notifyFilterList, setNotifyFilterList] = useState<string[]>([])
-  const [notifySessions, setNotifySessions] = useState<Array<{ username: string; displayName?: string }>>([])
+  const [notifySessions, setNotifySessions] = useState<SessionIdentityItem[]>([])
   const [notifyFilterSearch, setNotifyFilterSearch] = useState('')
   const [notifyFilterType, setNotifyFilterType] = useState<SessionType>('all')
   const [notifyFilterDraft, setNotifyFilterDraft] = useState<Set<string>>(new Set())
   const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
 
   const api = window.electronAPI
+  const autoRestartsWeChat = api.process.platform === 'win32' || api.process.platform === 'linux'
 
   const dismissToast = useCallback((id: number) => {
     const t = toastTimers.current.get(id)
@@ -329,6 +362,7 @@ export default function App() {
     namePref?: DisplayNamePref
     concurrency?: number
     layout?: WriteLayout
+    dateRange?: ExportDateRangeSelection
   }) => {
     if (opts.format !== undefined) void api.config.set('exportFormat', opts.format)
     if (opts.media !== undefined) void api.config.set('exportMedia', opts.media)
@@ -339,9 +373,51 @@ export default function App() {
     if (opts.namePref !== undefined) void api.config.set('exportDefaultDisplayNamePreference', opts.namePref)
     if (opts.concurrency !== undefined) void api.config.set('exportConcurrency', opts.concurrency)
     if (opts.layout !== undefined) void api.config.set('exportWriteLayout', opts.layout)
+    if (opts.dateRange !== undefined) void api.config.set('exportDefaultDateRange', serializeExportDateRangeConfig(opts.dateRange))
   }, [api])
 
+  function selectExportDatePreset(preset: ExportDateRangePreset) {
+    let next: ExportDateRangeSelection
+    if (preset === 'custom') {
+      const source = exportDateRange.preset === 'custom'
+        ? exportDateRange.dateRange
+        : (exportDateRange.useAllTime
+            ? createExportDateRangeSelectionFromPreset('today').dateRange
+            : createExportDateRangeSelectionFromPreset(exportDateRange.preset).dateRange)
+      next = {
+        preset: 'custom',
+        useAllTime: false,
+        dateRange: { start: startOfDay(source.start), end: endOfDay(source.end) },
+      }
+    } else {
+      next = createExportDateRangeSelectionFromPreset(preset)
+    }
+    setExportDateRange(next)
+    void saveExportOptions({ dateRange: next })
+  }
+
+  function changeCustomExportDate(boundary: 'start' | 'end', value: string) {
+    const parsed = parseDateValue(value, boundary)
+    if (!parsed) return
+
+    let start = boundary === 'start' ? parsed : new Date(exportDateRange.dateRange.start)
+    let end = boundary === 'end' ? parsed : new Date(exportDateRange.dateRange.end)
+    // 起止日期交叉时同步另一端，始终给导出层一个有效的闭区间。
+    if (start > end) {
+      if (boundary === 'start') end = parseDateValue(value, 'end') ?? parsed
+      else start = parseDateValue(value, 'start') ?? parsed
+    }
+    const next: ExportDateRangeSelection = {
+      preset: 'custom',
+      useAllTime: false,
+      dateRange: { start, end },
+    }
+    setExportDateRange(next)
+    void saveExportOptions({ dateRange: next })
+  }
+
   function resetExportDefaults() {
+    const defaultDateRange = createDefaultExportDateRangeSelection()
     setFormat(EXPORT_DEFAULTS.format)
     setWriteLayout(EXPORT_DEFAULTS.writeLayout)
     setExportMedia(EXPORT_DEFAULTS.media)
@@ -351,6 +427,7 @@ export default function App() {
     setExportConflict(EXPORT_DEFAULTS.conflict)
     setDisplayNamePref(EXPORT_DEFAULTS.namePref)
     setExportConcurrency(EXPORT_DEFAULTS.concurrency)
+    setExportDateRange(defaultDateRange)
     setExportSelectionMode('all')
     void saveExportOptions({
       format: EXPORT_DEFAULTS.format,
@@ -362,8 +439,9 @@ export default function App() {
       conflict: EXPORT_DEFAULTS.conflict,
       namePref: EXPORT_DEFAULTS.namePref,
       concurrency: EXPORT_DEFAULTS.concurrency,
+      dateRange: defaultDateRange,
     })
-    pushToast('ok', '已恢复默认导出设置', '目录结构 A · TXT 格式')
+    pushToast('ok', '已恢复默认导出设置', '目录结构 A · PDF 格式 · 全部时间')
   }
 
   const refreshExportLog = useCallback(async (path: string) => {
@@ -383,33 +461,37 @@ export default function App() {
     try {
       const result = await api.chat.getSessions()
       const seen = new Set<string>()
-      const sessions: ExportSessionPickerItem[] = []
+      let sessions: ExportSessionPickerItem[] = []
       for (const raw of result?.sessions || []) {
         const username = String(raw?.username || '').trim()
         if (!username || username.toLowerCase().includes('placeholder_foldgroup') || seen.has(username)) continue
         seen.add(username)
+        const sortTimestamp = Number(raw?.sortTimestamp ?? raw?.sort_timestamp ?? 0)
+        const lastTimestamp = Number(raw?.lastTimestamp ?? raw?.last_timestamp ?? 0)
         sessions.push({
           username,
           displayName: String(raw?.displayName || '').trim() || undefined,
           summary: String(raw?.summary || '').trim() || undefined,
           avatarUrl: String(raw?.avatarUrl || '').trim() || undefined,
           messageCountHint: Number.isFinite(Number(raw?.messageCountHint)) ? Math.max(0, Math.floor(Number(raw?.messageCountHint))) : undefined,
+          sortTimestamp: Number.isFinite(sortTimestamp) ? Math.max(0, Math.floor(sortTimestamp)) : 0,
+          lastTimestamp: Number.isFinite(lastTimestamp) ? Math.max(0, Math.floor(lastTimestamp)) : 0,
         })
       }
 
-      const missingNames = sessions.filter((session) => !session.displayName).map((session) => session.username)
-      if (missingNames.length > 0) {
-        try {
-          const enriched = await api.chat.enrichSessionsContactInfo(missingNames)
-          for (const session of sessions) {
-            if (!session.displayName) {
-              session.displayName = String(enriched?.contacts?.[session.username]?.displayName || '').trim() || undefined
-            }
-          }
-        } catch { /* cached/raw username remains usable */ }
-      }
+      try {
+        sessions = await hydrateSessionIdentities(
+          sessions,
+          (usernames) => api.chat.enrichSessionsContactInfo(usernames),
+        )
+      } catch { /* cached/raw username remains usable */ }
 
-      sessions.sort((a, b) => (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN'))
+      sessions.sort((a, b) => {
+        const latestA = a.sortTimestamp || a.lastTimestamp || 0
+        const latestB = b.sortTimestamp || b.lastTimestamp || 0
+        if (latestA !== latestB) return latestB - latestA
+        return (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN')
+      })
       setExportSessions(sessions)
       setSelectedExportSessionIds((previous) => {
         if (previous.size === 0) return previous
@@ -515,7 +597,7 @@ export default function App() {
     }
   }, [api, dbPath, saveAccountKey, selectedWxid])
 
-  const refreshAccounts = useCallback(async (path: string) => {
+  const refreshAccounts = useCallback(async (path: string, preferredWxid = '') => {
     if (!path.trim()) {
       setAccounts([])
       setSelectedWxid('')
@@ -527,9 +609,9 @@ export default function App() {
       if (list?.length) {
         // 自动切换选中账号时必须同步加载该账号的密钥状态，否则 decryptKey /
         // imageKeysOk 仍停留在旧账号上（导出拦截、密钥展示全部错位）。
-        const chosen = list.some((a) => a.wxid === selectedWxid) ? selectedWxid : list[0].wxid
+        const chosen = list.some((a) => a.wxid === preferredWxid) ? preferredWxid : list[0].wxid
         setSelectedWxid(chosen)
-        if (chosen !== selectedWxid) void loadAccountKey(chosen)
+        await loadAccountKey(chosen)
         pushToast('ok', `找到 ${list.length} 个账号`, path.trim(), 3200)
       } else {
         setSelectedWxid('')
@@ -540,9 +622,9 @@ export default function App() {
       setSelectedWxid('')
       pushToast('err', '扫描账号失败', String(e))
     }
-  }, [api, pushToast, selectedWxid, loadAccountKey])
+  }, [api, pushToast, loadAccountKey])
 
-  const detectDb = useCallback(async () => {
+  const detectDb = useCallback(async (preferredWxid = '') => {
     setBusy(true)
     setBusyLabel('正在扫描微信数据目录…')
     try {
@@ -550,7 +632,7 @@ export default function App() {
       if (result.success && result.path) {
         setDbPath(result.path)
         void persist({ dbPath: result.path })
-        await refreshAccounts(result.path)
+        await refreshAccounts(result.path, preferredWxid)
         pushToast('ok', '已定位数据目录', result.path)
       } else {
         pushToast('info', '未能自动检测', result.error || '请手动选择 xwechat_files 文件夹')
@@ -692,6 +774,8 @@ export default function App() {
           if (typeof concurrency === 'number' && CONCURRENCY_OPTIONS.includes(concurrency)) setExportConcurrency(concurrency)
           const layout = await api.config.get('exportWriteLayout')
           if (layout === 'A' || layout === 'B' || layout === 'C') setWriteLayout(layout)
+          const storedDateRange = await api.config.get('exportDefaultDateRange')
+          setExportDateRange(resolveExportDateRangeConfig(storedDateRange))
         } catch { /* 保持默认 */ }
 
         // 会话通知过滤
@@ -702,10 +786,9 @@ export default function App() {
           if (Array.isArray(list)) setNotifyFilterList(list.map((x) => String(x || '').trim()).filter(Boolean))
         } catch { /* 保持默认 */ }
         if (db) {
-          await refreshAccounts(String(db))
-          await loadAccountKey(String(wxid || ''))
+          await refreshAccounts(String(db), String(wxid || ''))
         } else {
-          await detectDb()
+          await detectDb(String(wxid || ''))
         }
       } catch {
         await detectDb()
@@ -816,7 +899,7 @@ export default function App() {
     if (selected) {
       setDbPath(selected)
       void persist({ dbPath: selected })
-      await refreshAccounts(selected)
+      await refreshAccounts(selected, selectedWxid)
     }
   }
 
@@ -829,7 +912,7 @@ export default function App() {
     }
   }
 
-  async function extractKey() {
+  async function extractKey(confirmed = false) {
     if (busy) return
     if (!dbPath.trim()) {
       pushToast('err', '请先选择微信数据目录')
@@ -839,10 +922,22 @@ export default function App() {
       pushToast('err', '请先选择微信账号', '获取密钥后需要绑定当前账号并验证数据库连接')
       return
     }
+    if (autoRestartsWeChat && !confirmed) {
+      setKeyExtractConfirmOpen(true)
+      return
+    }
+    setKeyExtractConfirmOpen(false)
     setBusy(true)
     setKeyHookReady(false)
-    setBusyLabel('正在连接微信进程…')
-    pushToast('info', '开始提取密钥', '密钥在登录瞬间捕获。请关闭微信「自动登录」，等待「已准备就绪」后重新登录。', 7000)
+    setBusyLabel(autoRestartsWeChat ? '正在重启微信并准备密钥监听…' : '正在连接微信进程…')
+    pushToast(
+      'info',
+      '开始提取密钥',
+      autoRestartsWeChat
+        ? '聊迹正在关闭并重新启动微信。微信打开后请等待“已准备就绪”，再确认登录。'
+        : '密钥在登录瞬间捕获。请关闭微信「自动登录」，等待「已准备就绪」后重新登录。',
+      7000,
+    )
     try {
       const result = await api.key.autoGetDbKey()
       if (result.success && result.key) {
@@ -852,6 +947,7 @@ export default function App() {
         const connection = await persistAndConnectKey(key)
         if (connection.success) {
           pushToast('ok', '密钥提取并连接成功', '已读取会话，可以开始导出全部聊天记录')
+          switchTab('chat')
         } else {
           pushToast('err', '密钥已获取，但数据库连接失败', connection.error, 10000)
         }
@@ -880,6 +976,7 @@ export default function App() {
       if (result.success) {
         setKeyHookReady(false)
         pushToast('ok', '密钥已确认，数据库已连接', '已读取会话，可以开始导出')
+        switchTab('chat')
       } else {
         pushToast('err', '数据库连接失败', result.error, 10000)
       }
@@ -889,7 +986,58 @@ export default function App() {
     }
   }
 
+  async function changeExportVoiceAsText(enabled: boolean) {
+    if (busy || checkingVoiceModel) return
+    if (!enabled) {
+      setExportVoiceAsText(false)
+      void saveExportOptions({ voiceAsText: false })
+      return
+    }
+
+    setCheckingVoiceModel(true)
+    try {
+      const status = await api.whisper.getModelStatus()
+      if (isVoiceModelReady(status)) {
+        setExportVoiceAsText(true)
+        void saveExportOptions({ voiceAsText: true })
+        return
+      }
+
+      // 首次启用时先让用户明确下载本项目的离线模型，下载成功后再真正勾选。
+      resumeExportAfterVoiceModelRef.current = false
+      setVoiceModelDialogOpen(true)
+    } catch (error) {
+      console.error('[App] 检查语音转写模型失败:', error)
+      resumeExportAfterVoiceModelRef.current = false
+      setVoiceModelDialogOpen(true)
+    } finally {
+      setCheckingVoiceModel(false)
+    }
+  }
+
+  function closeVoiceModelDialog() {
+    const wasWaitingToExport = resumeExportAfterVoiceModelRef.current
+    resumeExportAfterVoiceModelRef.current = false
+    setVoiceModelDialogOpen(false)
+    if (wasWaitingToExport) {
+      pushToast('info', '导出已取消', '需要先下载完整的语音识别模型，尚未开始写入导出文件')
+    }
+  }
+
+  function completeVoiceModelDownload() {
+    const shouldResumeExport = resumeExportAfterVoiceModelRef.current
+    resumeExportAfterVoiceModelRef.current = false
+    setVoiceModelDialogOpen(false)
+    setExportVoiceAsText(true)
+    void saveExportOptions({ voiceAsText: true })
+    pushToast('ok', '语音模型已就绪', shouldResumeExport ? '正在继续语音转换并导出' : '已开启导出前语音转文字')
+    if (shouldResumeExport) {
+      window.setTimeout(() => { void runExport() }, 0)
+    }
+  }
+
   async function runExport() {
+    if (busy || checkingVoiceModel) return
     if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')
       return
@@ -906,7 +1054,8 @@ export default function App() {
       pushToast('err', '请先提取或粘贴 64 位解密密钥')
       return
     }
-    if (exportSelectionMode === 'selected' && selectedExportSessionIds.size === 0) {
+    // 无论当前范围模式如何，都必须先明确勾选至少一个会话。
+    if (selectedExportSessionIds.size === 0) {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
@@ -916,13 +1065,6 @@ export default function App() {
       pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
       return
     }
-
-    setBusy(true)
-    setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
-    setExportTaskId(null)
-    setBusyLabel(exportSelectionMode === 'all'
-      ? '开始导出全部会话…'
-      : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
 
     const mediaEnabled = exportMedia.images || exportMedia.videos || exportMedia.voices || exportMedia.emojis || exportMedia.files
     const options: ExportRequest = {
@@ -944,9 +1086,127 @@ export default function App() {
       displayNamePreference: displayNamePref,
       exportConcurrency,
       exportWriteLayout: writeLayout,
+      dateRange: toExportTimestampRange(exportDateRange),
       sessionLayout: writeLayout === 'C' ? 'per-session' : 'shared',
       sessionNameWithTypePrefix: true,
     }
+    const scopedSessionIds = exportSelectionMode === 'selected'
+      ? Array.from(selectedExportSessionIds)
+      : exportSessions.map((session) => session.username)
+
+    if (exportVoiceAsText) {
+      setBusy(true)
+      setExportTaskId(null)
+      setBusyLabel('正在检查待转换语音…')
+      setProgress({
+        current: 0,
+        total: 0,
+        currentSession: '正在检查待转换语音…',
+        phase: 'preparing',
+        phaseLabel: '检查语音转文字状态',
+      })
+
+      let pendingVoiceCount: number | null = null
+      try {
+        const stats = await api.export.getExportStats(scopedSessionIds, options)
+        pendingVoiceCount = Math.max(0, Math.floor(Number(stats.needTranscribeCount || 0)))
+      } catch (error) {
+        // 统计失败时仍检查模型；导出器会按实际消息逐条处理，避免静默跳过转写。
+        console.error('[App] 获取导出语音统计失败:', error)
+      }
+
+      if (pendingVoiceCount === null || pendingVoiceCount > 0) {
+        let modelReady = false
+        try {
+          modelReady = isVoiceModelReady(await api.whisper.getModelStatus())
+        } catch (error) {
+          console.error('[App] 导出前检查语音模型失败:', error)
+        }
+
+        if (!modelReady) {
+          resumeExportAfterVoiceModelRef.current = true
+          setBusy(false)
+          setBusyLabel('')
+          setProgress(null)
+          setVoiceModelDialogOpen(true)
+          pushToast(
+            'info',
+            '需要先下载语音模型',
+            pendingVoiceCount && pendingVoiceCount > 0
+              ? `检测到 ${pendingVoiceCount.toLocaleString('zh-CN')} 条语音待转换，下载完成后将自动继续`
+              : '下载完成后将自动继续语音转换与导出',
+            8000,
+          )
+          return
+        }
+
+        if (pendingVoiceCount === null || pendingVoiceCount > 0) {
+          const pendingLabel = pendingVoiceCount === null
+            ? '待转换语音'
+            : `${pendingVoiceCount.toLocaleString('zh-CN')} 条语音`
+          setBusyLabel(`正在转换${pendingVoiceCount === null ? '语音' : ` ${pendingLabel}`}…`)
+          setProgress({
+            current: 0,
+            total: pendingVoiceCount || 0,
+            currentSession: '正在准备语音数据…',
+            phase: 'exporting-voice',
+            phaseLabel: pendingVoiceCount === null ? '语音转文字准备中' : `语音转文字 0/${pendingVoiceCount}`,
+          })
+          pushToast('info', '先执行语音转文字', `完成${pendingVoiceCount === null ? '' : ` ${pendingLabel}`}后自动导出`, 6000)
+
+          try {
+            const preparation = await api.export.prepareVoiceTranscripts(scopedSessionIds, options)
+            setExportTaskId(null)
+            if (!preparation.success) {
+              setBusy(false)
+              setBusyLabel('')
+              setProgress(null)
+              pushToast(
+                preparation.cancelled ? 'info' : 'err',
+                preparation.cancelled ? '语音转换已取消' : '语音转换失败',
+                preparation.error || '未开始后续导出操作',
+                10000,
+              )
+              return
+            }
+            if (preparation.failed > 0) {
+              setBusy(false)
+              setBusyLabel('')
+              setProgress(null)
+              pushToast(
+                'err',
+                `${preparation.failed.toLocaleString('zh-CN')} 条语音转换失败`,
+                '为避免导出不完整，尚未开始写入文件；可重试或关闭“语音转文字”后导出',
+                12000,
+              )
+              return
+            }
+            setProgress({
+              current: preparation.total,
+              total: preparation.total,
+              currentSession: '正在启动正式导出…',
+              phase: 'preparing',
+              phaseLabel: '语音转换完成',
+            })
+          } catch (error) {
+            setExportTaskId(null)
+            setBusy(false)
+            setBusyLabel('')
+            setProgress(null)
+            pushToast('err', '语音转换失败', String(error), 12000)
+            return
+          }
+        }
+      }
+    } else {
+      setBusy(true)
+      setProgress({ current: 0, total: 0, currentSession: '准备中…', phase: 'preparing', phaseLabel: '准备中' })
+      setExportTaskId(null)
+    }
+
+    setBusyLabel(exportSelectionMode === 'all'
+      ? '开始导出全部会话…'
+      : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
 
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
@@ -954,6 +1214,15 @@ export default function App() {
       if (result.success) {
         pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）`, 7000)
         setProgress((p: any) => (p ? { ...p, current: p.total || p.current, phaseLabel: '完成', phase: 'complete' } : { current: 1, total: 1, phaseLabel: '完成', phase: 'complete' }))
+        const exportedDirectory = String(result.outputDirectory || result.formatDir || '').trim()
+        if (exportedDirectory) {
+          // 导出成功后进入文件实际所在目录；打开失败不影响已经完成的导出结果。
+          void api.shell.openPath(exportedDirectory)
+            .then((errorMessage) => {
+              if (errorMessage) pushToast('err', '打开导出目录失败', errorMessage, 8000)
+            })
+            .catch((error) => pushToast('err', '打开导出目录失败', String(error), 8000))
+        }
       } else {
         pushToast('err', '导出未完全成功', result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`, 12000)
       }
@@ -972,8 +1241,13 @@ export default function App() {
     if (!res.success) {
       pushToast('err', '取消失败', '导出任务不存在或已结束', 6000)
     } else {
-      pushToast('info', '正在取消导出…', '已写入的部分文件将被清理')
-      setBusyLabel('正在取消导出…')
+      const cancellingVoicePreparation = exportTaskId.startsWith('voice-prep-')
+      pushToast(
+        'info',
+        cancellingVoicePreparation ? '正在停止语音转换…' : '正在取消导出…',
+        cancellingVoicePreparation ? '停止后不会开始后续导出' : '已写入的部分文件将被清理',
+      )
+      setBusyLabel(cancellingVoicePreparation ? '正在停止语音转换…' : '正在取消导出…')
     }
   }
 
@@ -1069,7 +1343,7 @@ export default function App() {
     setBackupBusy(true)
     try {
       const file = await api.dialog.openFile({
-        filters: [{ name: 'Weport 备份', extensions: ['zip'] }],
+        filters: [{ name: '聊迹备份', extensions: ['zip'] }],
       })
       if (!file) return
       pushToast('info', '正在恢复备份…', '将覆盖当前数据库中的对应表')
@@ -1194,7 +1468,13 @@ export default function App() {
     setAntiRevokeBusy(true)
     try {
       const sessionsResult = await api.chat.getAntiRevokeSessions()
-      const sessions: AntiRevokeSession[] = sessionsResult.sessions || []
+      let sessions: AntiRevokeSession[] = sessionsResult.sessions || []
+      try {
+        sessions = await hydrateSessionIdentities(
+          sessions,
+          (usernames) => api.chat.enrichSessionsContactInfo(usernames),
+        )
+      } catch { /* status checks remain available even if profile enrichment fails */ }
       setAntiRevokeSessions(sessions)
       if (sessions.length > 0) {
         const ids = sessions.map((s) => s.username)
@@ -1260,9 +1540,11 @@ export default function App() {
     return Math.max(0, Math.min(100, (progress.current / progress.total) * 100))
   }, [progress])
 
-  const formatFolder = FORMAT_FOLDERS[format] || 'TXT'
+  const formatFolder = FORMAT_FOLDERS[format] || 'PDF'
   const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
   const isExporting = busy && tab === 'export' && !!progress && progress.phase !== 'complete'
+  // 按实际勾选数量控制按钮，防止“全部会话”模式绕过空选择校验。
+  const isExportSelectionEmpty = selectedExportSessionIds.size === 0
 
   function switchTab(next: Tab) {
     setTab(next)
@@ -1296,21 +1578,24 @@ export default function App() {
     setNotifyFilterBusy(true)
     try {
       const result = await api.chat.getSessions()
-      const sessions: Array<{ username: string; displayName?: string }> = []
+      let sessions: SessionIdentityItem[] = []
+      const seen = new Set<string>()
       for (const s of result?.sessions || []) {
         const username = String(s?.username || '').trim()
-        if (!username || username.toLowerCase().includes('placeholder_foldgroup')) continue
-        sessions.push({ username, displayName: String(s?.displayName || '') || undefined })
+        if (!username || username.toLowerCase().includes('placeholder_foldgroup') || seen.has(username)) continue
+        seen.add(username)
+        sessions.push({
+          username,
+          displayName: String(s?.displayName || '').trim() || undefined,
+          avatarUrl: String(s?.avatarUrl || '').trim() || undefined,
+        })
       }
-      const missing = sessions.filter((s) => !s.displayName).map((s) => s.username)
-      if (missing.length > 0) {
-        try {
-          const enriched = await api.chat.enrichSessionsContactInfo(missing)
-          for (const s of sessions) {
-            if (!s.displayName) s.displayName = enriched?.contacts?.[s.username]?.displayName
-          }
-        } catch { /* noop */ }
-      }
+      try {
+        sessions = await hydrateSessionIdentities(
+          sessions,
+          (usernames) => api.chat.enrichSessionsContactInfo(usernames),
+        )
+      } catch { /* keep the basic session list available */ }
       sessions.sort((a, b) => (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN'))
       setNotifySessions(sessions)
     } catch (e) {
@@ -1332,9 +1617,54 @@ export default function App() {
     pushToast('ok', '会话过滤已保存', notifyFilterMode === 'all' ? '通知全部会话' : `已选 ${list.length} 个会话`)
   }
 
+  /**
+   * 渲染统一的侧栏入口。
+   * 锁定条件、切换函数与持久化行为沿用原实现，避免视觉改造影响功能。
+   */
+  function renderNavigationItem(item: (typeof TABS)[number], placement: 'main' | 'footer' = 'main') {
+    const Icon = item.icon
+    const locked = item.id !== 'connect' && !allReady
+    const button = (
+      <button
+        type="button"
+        role="tab"
+        aria-label={item.label}
+        aria-selected={tab === item.id}
+        className="tab"
+        data-active={tab === item.id}
+        data-placement={placement}
+        disabled={locked}
+        title={locked ? undefined : item.label}
+        onClick={() => switchTab(item.id)}
+      >
+        <Icon size={16} strokeWidth={1.8} />
+        {item.id === 'connect' ? (
+          <span className="tab-copy">
+            <span className="tab-label">{item.label}</span>
+            <small>{allReady ? '微信数据已就绪' : '等待连接'}</small>
+          </span>
+        ) : (
+          <span className="tab-label">{item.label}</span>
+        )}
+        {item.id === 'connect' && <span className="connection-dot" data-ready={allReady} aria-hidden />}
+      </button>
+    )
+
+    // disabled 按钮不触发原生 title，继续由外层承载未连接提示。
+    return locked ? (
+      <span key={item.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+        {button}
+      </span>
+    ) : (
+      <span key={item.id} className="tab-entry">
+        {button}
+      </span>
+    )
+  }
+
   return (
     <div className="shell">
-      <header className="topbar">
+      <aside className="topbar" aria-label="聊迹主导航">
         <div
           className="brand"
           role="button"
@@ -1352,45 +1682,25 @@ export default function App() {
             <MarkIcon />
           </div>
           <div className="brand-text">
-            <h1>Weport</h1>
-            <p title={busy && tab === 'export' ? `v${version}` : `微信工具箱 · v${version}${busyLabel ? ` · ${busyLabel}` : ''}`}>
-              微信工具箱 · v{version}
-              {busy && tab === 'export' ? '' : busyLabel ? ` · ${busyLabel}` : ''}
-            </p>
+            <h1>聊迹</h1>
           </div>
         </div>
-        <nav className="tabs" role="tablist" aria-label="功能">
-          {TABS.map((t) => {
-            const Icon = t.icon
-            // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
-            const locked = t.id !== 'connect' && !allReady
-            const button = (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === t.id}
-                className="tab"
-                data-active={tab === t.id}
-                disabled={locked}
-                onClick={() => switchTab(t.id)}
-              >
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{t.label}</span>
-              </button>
-            )
-            // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
-            return locked ? (
-              <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
-                {button}
-              </span>
-            ) : (
-              button
-            )
-          })}
+        <nav className="sidebar-nav" role="tablist" aria-label="功能">
+          <div className="tabs">
+            {NAV_GROUPS.map((group) => (
+              <div className="nav-group" key={group.label} role="presentation">
+                <div className="nav-group-label">{group.label}</div>
+                {TABS.filter((item) => group.ids.includes(item.id)).map((item) => renderNavigationItem(item))}
+              </div>
+            ))}
+          </div>
+          <div className="sidebar-footer" role="presentation">
+            {TABS.filter((item) => NAV_FOOTER_IDS.includes(item.id)).map((item) => renderNavigationItem(item, 'footer'))}
+          </div>
         </nav>
-        <div className="top-actions" />
-      </header>
+      </aside>
+
+      <main className="app-stage">
 
       {updateInfo && (
         <div className="update-banner">
@@ -1417,7 +1727,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="workspace" key={tab}>
+      <div className={`workspace${tab === 'export' ? ' workspace-export' : ''}${tab === 'chat' ? ' workspace-chat' : ''}${tab === 'contacts' ? ' workspace-contacts' : ''}`} key={tab}>
         {tab === 'connect' && (
           <div className="two-col">
             <section className="panel connect-loc">
@@ -1443,7 +1753,7 @@ export default function App() {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && dbPath.trim()) {
                         void persist({ dbPath: dbPath.trim() })
-                        void refreshAccounts(dbPath.trim())
+                        void refreshAccounts(dbPath.trim(), selectedWxid)
                       }
                     }}
                     spellCheck={false}
@@ -1454,14 +1764,14 @@ export default function App() {
                 </div>
               </div>
               <div className="btn-row">
-                <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
+                <button className="secondary-btn" type="button" onClick={() => void detectDb(selectedWxid)} disabled={busy}>
                   <RefreshCw size={14} />
                   重新扫描
                 </button>
                 <button
                   className="secondary-btn"
                   type="button"
-                  onClick={() => void refreshAccounts(dbPath)}
+                  onClick={() => void refreshAccounts(dbPath, selectedWxid)}
                   disabled={busy || !dbPath.trim()}
                 >
                   <Users size={14} />
@@ -1482,21 +1792,31 @@ export default function App() {
                 <li>
                   <span className="step-num">1</span>
                   <span>
-                    打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
-                    然后退出当前登录（或完全退出微信）
+                    {autoRestartsWeChat ? (
+                      <>先保存微信中未发送的内容，并在「设置 → 通用」里<strong>关闭「自动登录」</strong></>
+                    ) : (
+                      <>打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，然后退出当前登录（或完全退出微信）</>
+                    )}
                   </span>
                 </li>
                 <li>
                   <span className="step-num">2</span>
                   <span>
-                    点击下方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
-                    此时 Weport 已挂接微信进程，正在等待登录
+                    {autoRestartsWeChat ? (
+                      <>点击下方<strong>「提取密钥」</strong>，聊迹将自动关闭所有微信进程并重新打开微信</>
+                    ) : (
+                      <>点击下方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——此时聊迹已挂接微信进程，正在等待登录</>
+                    )}
                   </span>
                 </li>
                 <li>
                   <span className="step-num">3</span>
                   <span>
-                    用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
+                    {autoRestartsWeChat ? (
+                      <>微信打开后暂不要登录；等待<strong>「已准备就绪」</strong>，再用手机确认登录</>
+                    ) : (
+                      <>用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）</>
+                    )}
                   </span>
                 </li>
                 <li>
@@ -1625,37 +1945,22 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'export' && (
-          <section className="panel panel-fill">
-            <div className="panel-head">
-              <h2>
-                <Download size={15} />
-                导出数据
-              </h2>
-              <div className="panel-head-actions">
-                <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
-                <button
-                  className="ghost-btn"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => resetExportDefaults()}
-                  title="恢复默认导出设置（目录结构 A · TXT）"
-                >
-                  <RotateCcw size={13} />
-                  恢复默认
-                </button>
-                <button
-                  className="danger-btn"
-                  type="button"
-                  disabled={busy || !exportPath.trim()}
-                  onClick={() => setClearOpen(true)}
-                >
-                  <Trash2 size={13} />
-                  清空导出库
-                </button>
-              </div>
-            </div>
+        {tab === 'chat' && (
+          <ChatPage
+            onExportSession={(sessionId) => {
+              setSelectedExportSessionIds(new Set([sessionId]))
+              setExportSelectionMode('selected')
+              setExportSessionSearch('')
+              setExportSessionType('all')
+              switchTab('export')
+            }}
+          />
+        )}
 
+        {tab === 'contacts' && <ContactsPage onNotify={pushToast} />}
+
+        {tab === 'export' && (
+          <div className="export-page-layout">
             <ExportSessionPicker
               sessions={filteredExportSessions}
               totalSessions={exportSessions.length}
@@ -1674,7 +1979,37 @@ export default function App() {
               disabled={busy}
             />
 
-            {/* 1. 输出设置 */}
+            <section className="panel export-config-panel">
+            <div className="panel-head">
+              <h2>
+                <Download size={15} />
+                导出数据
+              </h2>
+              <div className="panel-head-actions">
+                <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => resetExportDefaults()}
+                  title="恢复默认导出设置（目录结构 A · PDF · 全部时间）"
+                >
+                  <RotateCcw size={13} />
+                  恢复默认
+                </button>
+                <button
+                  className="danger-btn"
+                  type="button"
+                  disabled={busy || !exportPath.trim()}
+                  onClick={() => setClearOpen(true)}
+                >
+                  <Trash2 size={13} />
+                  清空导出库
+                </button>
+              </div>
+            </div>
+
+            {/* 2. 输出设置 */}
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">2</span>
@@ -1748,7 +2083,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 2. 导出格式 */}
+            {/* 3. 导出格式 */}
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">3</span>
@@ -1783,10 +2118,80 @@ export default function App() {
               </div>
             </div>
 
-            {/* 3. 内容 */}
+            {/* 4. 日期范围：预设在真正导出时重新计算，避免应用长时间开启后范围过期。 */}
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">4</span>
+                <CalendarRange size={14} />
+                日期范围
+              </div>
+              <div className="export-date-range-panel">
+                <div className="export-date-presets" role="radiogroup" aria-label="导出日期范围">
+                  {EXPORT_DATE_RANGE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      className="chip chip-sm export-date-preset"
+                      data-active={exportDateRange.preset === preset.value}
+                      role="radio"
+                      aria-checked={exportDateRange.preset === preset.value}
+                      disabled={busy}
+                      onClick={() => selectExportDatePreset(preset.value)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="chip chip-sm export-date-preset"
+                    data-active={exportDateRange.preset === 'custom'}
+                    role="radio"
+                    aria-checked={exportDateRange.preset === 'custom'}
+                    disabled={busy}
+                    onClick={() => selectExportDatePreset('custom')}
+                  >
+                    自定义
+                  </button>
+                </div>
+
+                {exportDateRange.preset === 'custom' && (
+                  <div className="export-custom-date-range">
+                    <label>
+                      <span>开始日期</span>
+                      <input
+                        type="date"
+                        value={formatDateValue(exportDateRange.dateRange.start)}
+                        max={formatDateValue(new Date())}
+                        onChange={(event) => changeCustomExportDate('start', event.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                    <span className="export-date-separator">至</span>
+                    <label>
+                      <span>结束日期</span>
+                      <input
+                        type="date"
+                        value={formatDateValue(exportDateRange.dateRange.end)}
+                        max={formatDateValue(new Date())}
+                        onChange={(event) => changeCustomExportDate('end', event.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <p className="export-date-summary" aria-live="polite">
+                  <CalendarRange size={13} />
+                  <span>导出范围：<strong>{getExportDateRangeLabel(exportDateRange)}</strong></span>
+                  <span>{exportDateRange.preset === 'custom' ? '（包含起止日期全天）' : '（导出时按当前日期计算）'}</span>
+                </p>
+              </div>
+            </div>
+
+            {/* 5. 内容 */}
+            <div className="exp-section">
+              <div className="exp-sec-head">
+                <span className="exp-num">5</span>
                 <Paperclip size={14} />
                 内容（媒体与附件）
               </div>
@@ -1854,7 +2259,7 @@ export default function App() {
               </p>
             </div>
 
-            {/* 4. 高级选项 */}
+            {/* 6. 高级选项 */}
             <div className="exp-section">
               <button
                 type="button"
@@ -1862,7 +2267,7 @@ export default function App() {
                 onClick={() => setShowAdvanced((v) => !v)}
                 aria-expanded={showAdvanced}
               >
-                <span className="exp-num">5</span>
+                <span className="exp-num">6</span>
                 <SettingsIcon size={14} />
                 高级选项
                 <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
@@ -1886,13 +2291,10 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={exportVoiceAsText}
-                        onChange={(e) => {
-                          setExportVoiceAsText(e.target.checked)
-                          void saveExportOptions({ voiceAsText: e.target.checked })
-                        }}
-                        disabled={busy}
+                        onChange={(e) => { void changeExportVoiceAsText(e.target.checked) }}
+                        disabled={busy || checkingVoiceModel}
                       />
-                      <span>语音转文字（若已转换）</span>
+                      <span>{checkingVoiceModel ? '正在检查语音模型…' : '语音转文字（导出前自动转换）'}</span>
                     </label>
                   </div>
                   <div className="opt-row">
@@ -2000,7 +2402,13 @@ export default function App() {
                   />
                 </div>
                 <div className="progress-meta">
-                  <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
+                  <strong
+                    className="progress-session"
+                    title={[progress.phaseLabel, progress.currentSession].filter(Boolean).join(' · ')}
+                  >
+                    {progress.phaseLabel || progress.currentSession || '准备中…'}
+                    {progress.phaseLabel && progress.currentSession ? ` · ${progress.currentSession}` : ''}
+                  </strong>
                   <span className="progress-count">
                     {progress.total > 0
                       ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
@@ -2011,10 +2419,15 @@ export default function App() {
             )}
 
             <div className="export-actions">
-              <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
+              <button
+                className="primary-btn block"
+                type="button"
+                disabled={busy || checkingVoiceModel || isExportSelectionEmpty}
+                onClick={() => void runExport()}
+              >
                 <Download size={16} />
                 {busy && progress
-                  ? '导出中…'
+                  ? progress.phase === 'exporting-voice' ? '语音转换中…' : '导出中…'
                   : exportSelectionMode === 'all'
                     ? '导出全部聊天记录'
                     : `导出已选聊天记录${selectedExportSessionIds.size ? `（${selectedExportSessionIds.size}）` : ''}`}
@@ -2028,7 +2441,8 @@ export default function App() {
                 清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
               </p>
             </div>
-          </section>
+            </section>
+          </div>
         )}
 
         {tab === 'ai' && <WeportAiPanel />}
@@ -2043,7 +2457,7 @@ export default function App() {
                   <ShieldCheck size={15} />
                   防撤回
                 </h2>
-                <span>会话级 WCDB 触发器（安装后无需保持 Weport 运行）</span>
+                <span>会话级 WCDB 触发器（安装后无需保持聊迹运行）</span>
               </div>
               <p className="hint">
                 对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
@@ -2102,18 +2516,19 @@ export default function App() {
                   {antiRevokeSessions.map((s) => {
                     const installed = antiRevokeInstalled[s.username] === true
                     return (
-                      <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
-                        <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
-                        <span className="ar-id">{s.username}</span>
-                        <span className={`badge ${installed ? 'ok' : ''}`}>{installed ? '已安装' : '未安装'}</span>
-                        <button
-                          className="ghost-btn"
-                          type="button"
-                          disabled={antiRevokeBusy}
-                          onClick={() => (installed ? void uninstallAntiRevoke([s.username]) : void installAntiRevoke([s.username]))}
-                        >
-                          {installed ? '还原' : '安装'}
-                        </button>
+                      <div key={s.username} className="session-control-row anti-revoke" data-active={installed}>
+                        <SessionIdentity session={s} avatarSize={36} />
+                        <div className="session-control-actions">
+                          <span className={`badge ${installed ? 'ok' : ''}`}>{installed ? '已安装' : '未安装'}</span>
+                          <button
+                            className="ghost-btn"
+                            type="button"
+                            disabled={antiRevokeBusy}
+                            onClick={() => (installed ? void uninstallAntiRevoke([s.username]) : void installAntiRevoke([s.username]))}
+                          >
+                            {installed ? '还原' : '安装'}
+                          </button>
+                        </div>
                       </div>
                     )
                   })}
@@ -2283,7 +2698,7 @@ export default function App() {
                   <div>
                     <strong>开机自启</strong>
                     <span className="hint">
-                      {startupSupported ? '登录系统后自动启动 Weport' : startupReason || '当前环境不支持'}
+                      {startupSupported ? '登录系统后自动启动聊迹' : startupReason || '当前环境不支持'}
                     </span>
                   </div>
                 </div>
@@ -2416,88 +2831,11 @@ export default function App() {
               </div>
             </section>
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Palette size={15} />
-                  色彩主题
-                </h2>
-                <span>应用于文字 / 图标 / 图表 / 数字</span>
-              </div>
-              <div className="theme-picker">
-                {(
-                  [
-                    {
-                      id: 'colorful',
-                      label: '浅蓝',
-                      desc: '统一浅蓝 accent 色调，现代克制',
-                      icon: Palette,
-                      swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
-                    },
-                    {
-                      id: 'mono',
-                      label: '黑白',
-                      desc: '经典单色灰阶，保持纯黑白风格',
-                      icon: Contrast,
-                      swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
-                    },
-                  ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
-                ).map((t) => {
-                  const Icon = t.icon
-                  const active = colorMode === t.id
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                      onClick={() => setColorMode(t.id)}
-                    >
-                      <div className="theme-card-head">
-                        <Icon size={17} />
-                        <strong>{t.label}</strong>
-                        {active && <span className="theme-card-check">当前</span>}
-                      </div>
-                      <div className="theme-swatches">
-                        {t.swatches.map((c) => (
-                          <span key={c} style={{ background: c }} />
-                        ))}
-                      </div>
-                      <span className="theme-card-desc">{t.desc}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Info size={15} />
-                  关于
-                </h2>
-                <span>版本与更新</span>
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Info size={14} />
-                  <div>
-                    <strong>Weport v{version}</strong>
-                    <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
-                  </div>
-                </div>
-                <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                  {updateBusy ? '检查中…' : '检查更新'}
-                </button>
-                {updateInfo && (
-                  <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
-                  </button>
-                )}
-              </div>
-            </section>
           </div>
         )}
       </div>
+
+      </main>
 
       <div className="toast-stack" aria-live="polite">
         {toasts.map((t) => (
@@ -2515,6 +2853,37 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {keyExtractConfirmOpen && (
+        <div className="modal-backdrop" onClick={() => setKeyExtractConfirmOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="key-extract-title">
+            <h3 id="key-extract-title">
+              <KeyRound size={15} />
+              开始提取数据库密钥
+            </h3>
+            <p>继续后，聊迹将关闭当前所有微信进程，并自动重新启动微信。</p>
+            <p style={{ marginTop: 8 }}>
+              请先保存未发送的内容，并关闭微信的「自动登录」。微信重新打开后先不要登录，
+              等待聊迹显示「已准备就绪」，再在手机上确认登录。
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setKeyExtractConfirmOpen(false)}>
+                取消
+              </button>
+              <button className="primary-btn" type="button" onClick={() => void extractKey(true)}>
+                确认并继续
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {voiceModelDialogOpen && (
+        <VoiceTranscribeDialog
+          onClose={closeVoiceModelDialog}
+          onDownloadComplete={completeVoiceModelDownload}
+        />
+      )}
 
       {clearOpen && (
         <div className="modal-backdrop" onClick={() => !busy && setClearOpen(false)}>
@@ -2623,8 +2992,7 @@ export default function App() {
                           setNotifyFilterDraft(next)
                         }}
                       />
-                      <span className="notify-name">{s.displayName || s.username}</span>
-                      <span className="notify-id">{s.username}</span>
+                      <SessionIdentity session={s} avatarSize={34} />
                     </label>
                   )
                 })
@@ -2662,7 +3030,7 @@ export default function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <h3>
               <Info size={15} />
-              Weport v{version}
+              聊迹 v{version}
             </h3>
             <p>轻量微信聊天记录导出工具。读取本机微信 4.x 数据，导出全部私聊与群聊为 TXT / JSON。</p>
             <p style={{ marginTop: 8 }}>

@@ -301,8 +301,8 @@ analytics-group / settings) — 12 captures total, all asserted non-blank.
 ## Export Layout
 
 GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/{FMT}/`
-(FMT = TXT / JSON / HTML / XLSX / MARKDOWN / CHATLAB / CHATLAB-JSONL /
-ARKME-JSON / WECLONE / SQL) with `群聊_`/`私聊_` prefixes. Defaults: 目录结构 A
+(FMT = PDF / TXT / JSON / HTML / XLSX / MARKDOWN / CHATLAB / CHATLAB-JSONL /
+ARKME-JSON / WECLONE) with `群聊_`/`私聊_` prefixes. 默认格式 PDF；Defaults: 目录结构 A
 (exportWriteLayout A + sessionLayout `shared`, text flat at root), conflict
 `overwrite`, `sessionNameWithTypePrefix: true`; layout C maps to
 `sessionLayout: per-session` (text-only exports honor it too —

@@ -44,7 +44,7 @@ const CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'deepseek',
     name: 'DeepSeek',
-    description: 'DeepSeek OpenAI-compatible API，兼容现有 WeportAI 配置。',
+    description: 'DeepSeek OpenAI-compatible API，兼容现有聊迹 AI 配置。',
     protocol: 'openai-compatible',
     baseUrl: 'https://api.deepseek.com',
     defaultModel: 'deepseek-v4-flash',
