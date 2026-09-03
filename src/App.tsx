@@ -231,7 +231,7 @@ const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
 
 function MarkIcon() {
   // 界面品牌位与主窗口、托盘、通知窗和安装包共用同一图标母版。
-  return <img className="mark-img" src="/icon.png" alt="聊迹" draggable={false} />
+  return <img className="mark-img" src={`${import.meta.env.BASE_URL}icon.png`} alt="聊迹" draggable={false} />
 }
 
 export default function App() {
